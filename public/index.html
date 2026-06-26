@@ -193,6 +193,44 @@
     .nav a.active { color: var(--acid); }
     .nav a .ico { display: block; font-size: 1.05rem; margin-bottom: 3px; }
 
+    /* WOD / Log screen */
+    .wod-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+    .wod-name { font-size: 1.5rem; font-weight: 800; margin: 0; }
+    .type-badge {
+      font-size: 0.66rem; letter-spacing: 0.12em; text-transform: uppercase;
+      color: var(--acid); border: 1px solid var(--acid); border-radius: 999px;
+      padding: 4px 10px; white-space: nowrap;
+    }
+    .wod-date { color: var(--muted); font-size: 0.74rem; letter-spacing: 0.1em; text-transform: uppercase; margin: 4px 0 10px; }
+    .wod-desc { color: var(--chalk); font-size: 0.95rem; line-height: 1.5; margin: 0; }
+
+    .range-row { display: flex; align-items: center; gap: 12px; }
+    input[type="range"] { flex: 1; accent-color: var(--acid); }
+    .range-val { min-width: 3.2em; text-align: right; font-weight: 700; color: var(--acid); }
+
+    /* Big score reveal after logging */
+    .score-reveal { text-align: center; padding: 8px 0 4px; }
+    .score-reveal .num { font-size: 3rem; font-weight: 800; color: var(--acid); line-height: 1; }
+    .score-reveal .cap { color: var(--muted); font-size: 0.72rem; letter-spacing: 0.14em; text-transform: uppercase; margin-top: 6px; }
+
+    /* Leaderboard */
+    .lb-row {
+      display: flex; align-items: center; gap: 12px;
+      padding: 12px 14px; border: 1px solid var(--border); border-radius: 12px;
+      background: var(--surface); margin-bottom: 8px;
+    }
+    .lb-row.me { border-color: var(--acid); background: var(--acid-dim); }
+    .lb-rank { width: 1.6em; text-align: center; font-weight: 800; color: var(--muted); font-size: 0.95rem; flex: none; }
+    .lb-row.me .lb-rank { color: var(--acid); }
+    .lb-main { flex: 1; min-width: 0; }
+    .lb-name { font-weight: 700; font-size: 0.98rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .lb-sub { color: var(--muted); font-size: 0.76rem; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .lb-score { text-align: right; flex: none; }
+    .lb-score .s { font-weight: 800; color: var(--acid); font-size: 1.05rem; }
+    .lb-score .t { color: var(--muted); font-size: 0.72rem; }
+
+    .empty { text-align: center; color: var(--muted); padding: 28px 10px; line-height: 1.5; }
+
     .hidden { display: none !important; }
   </style>
 </head>
@@ -209,9 +247,9 @@
     </div>
 
     <nav class="nav">
-      <a href="#"><span class="ico">▦</span>WOD</a>
-      <a href="#"><span class="ico">≡</span>Leaderboard</a>
-      <a href="#" class="active"><span class="ico">◉</span>Profile</a>
+      <a href="#" data-view="log"><span class="ico">▦</span>WOD</a>
+      <a href="#" data-view="leaderboard"><span class="ico">≡</span>Leaderboard</a>
+      <a href="#" data-view="profile" class="active"><span class="ico">◉</span>Profile</a>
     </nav>
 
     <div class="toast" id="toast">Saved ✓</div>

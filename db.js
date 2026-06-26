@@ -61,6 +61,42 @@ const SCHEMA_SQL = `
 
   CREATE INDEX IF NOT EXISTS idx_identities_user_id ON identities(user_id);
   CREATE INDEX IF NOT EXISTS idx_identities_email   ON identities(email);
+
+  CREATE TABLE IF NOT EXISTS workouts (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name        TEXT NOT NULL,
+    type        TEXT,
+    description TEXT,
+    wod_date    DATE NOT NULL DEFAULT CURRENT_DATE
+  );
+
+  CREATE TABLE IF NOT EXISTS results (
+    id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id        UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    workout_id     UUID NOT NULL REFERENCES workouts(id) ON DELETE CASCADE,
+    time_seconds   INTEGER,
+    rom_pct        NUMERIC(5,2),
+    unbroken_sets  INTEGER,
+    holistic_score NUMERIC(6,2),
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- One result per athlete per workout; re-logging updates the existing row
+    -- so the leaderboard never shows the same person twice.
+    UNIQUE (user_id, workout_id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_results_workout ON results(workout_id);
+  CREATE INDEX IF NOT EXISTS idx_results_user    ON results(user_id);
+`;
+
+// Idempotent seed: ensure there is a "Fran" workout for today.
+const SEED_SQL = `
+  INSERT INTO workouts (name, type, description, wod_date)
+  SELECT 'Fran', 'For Time',
+         '21-15-9 reps for time: Thrusters (95/65 lb) and Pull-ups.',
+         CURRENT_DATE
+  WHERE NOT EXISTS (
+    SELECT 1 FROM workouts WHERE name = 'Fran' AND wod_date = CURRENT_DATE
+  );
 `;
 
 async function migrate() {
@@ -71,7 +107,8 @@ async function migrate() {
     );
   }
   await pool.query(SCHEMA_SQL);
-  console.log('[db] migration complete (users, profiles, identities ready)');
+  await pool.query(SEED_SQL);
+  console.log('[db] migration complete (users, profiles, identities, workouts, results ready; Fran seeded for today)');
 }
 
 module.exports = { pool, migrate };

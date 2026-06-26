@@ -5,6 +5,7 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const { pool, migrate } = require('./db');
+const { computeHolisticScore } = require('./holisticScore');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -221,6 +222,106 @@ app.post('/api/profile/:userId/avatar', wrap(async (req, res) => {
   );
 
   res.status(201).json({ avatar_url });
+}));
+
+// ---- API: workouts ----------------------------------------------------------
+// Today's WOD (falls back to the most recent if nothing is dated today).
+app.get('/api/workouts/today', wrap(async (req, res) => {
+  const result = await pool.query(
+    `SELECT id, name, type, description, wod_date
+       FROM workouts
+      ORDER BY (wod_date = CURRENT_DATE) DESC, wod_date DESC
+      LIMIT 1`
+  );
+  if (!result.rows[0]) {
+    return res.status(404).json({ error: 'No workouts found.' });
+  }
+  res.json(result.rows[0]);
+}));
+
+// Full workout list (most recent first).
+app.get('/api/workouts', wrap(async (req, res) => {
+  const result = await pool.query(
+    `SELECT id, name, type, description, wod_date FROM workouts ORDER BY wod_date DESC, name`
+  );
+  res.json(result.rows);
+}));
+
+// ---- API: submit a result ---------------------------------------------------
+// Accepts a user's raw inputs, computes the Holistic Score SERVER-SIDE (single
+// source of truth), and upserts it. Re-logging the same workout updates the row.
+app.post('/api/results', wrap(async (req, res) => {
+  const body = req.body || {};
+  const { user_id, workout_id } = body;
+
+  if (!isUuid(user_id)) return res.status(400).json({ error: 'A valid user_id is required.' });
+  if (!isUuid(workout_id)) return res.status(400).json({ error: 'A valid workout_id is required.' });
+
+  const time_seconds = Number(body.time_seconds);
+  const rom_pct = Number(body.rom_pct);
+  const unbroken_sets = Number(body.unbroken_sets);
+
+  if (!Number.isFinite(time_seconds) || time_seconds <= 0 || time_seconds > 86400) {
+    return res.status(400).json({ error: 'time_seconds must be a number between 1 and 86400.' });
+  }
+  if (!Number.isFinite(rom_pct) || rom_pct < 0 || rom_pct > 100) {
+    return res.status(400).json({ error: 'rom_pct must be between 0 and 100.' });
+  }
+  if (!Number.isInteger(unbroken_sets) || unbroken_sets < 0 || unbroken_sets > 1000) {
+    return res.status(400).json({ error: 'unbroken_sets must be a whole number between 0 and 1000.' });
+  }
+
+  const [userExists, workoutExists] = await Promise.all([
+    pool.query('SELECT 1 FROM users WHERE user_id = $1', [user_id]),
+    pool.query('SELECT 1 FROM workouts WHERE id = $1', [workout_id]),
+  ]);
+  if (!userExists.rows[0]) return res.status(404).json({ error: 'User not found.' });
+  if (!workoutExists.rows[0]) return res.status(404).json({ error: 'Workout not found.' });
+
+  const holistic_score = computeHolisticScore({ time_seconds, rom_pct, unbroken_sets });
+
+  const result = await pool.query(
+    `INSERT INTO results (user_id, workout_id, time_seconds, rom_pct, unbroken_sets, holistic_score)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (user_id, workout_id) DO UPDATE SET
+         time_seconds   = EXCLUDED.time_seconds,
+         rom_pct        = EXCLUDED.rom_pct,
+         unbroken_sets  = EXCLUDED.unbroken_sets,
+         holistic_score = EXCLUDED.holistic_score,
+         created_at     = now()
+       RETURNING id, user_id, workout_id, time_seconds, rom_pct, unbroken_sets, holistic_score, created_at`,
+    [user_id, workout_id, time_seconds, rom_pct, unbroken_sets, holistic_score]
+  );
+
+  res.status(201).json(result.rows[0]);
+}));
+
+// ---- API: leaderboard -------------------------------------------------------
+// All results for a workout, joined to the athlete's display_name + gym_name,
+// ranked by Holistic Score (then faster time as a tiebreaker).
+app.get('/api/leaderboard/:workoutId', wrap(async (req, res) => {
+  const { workoutId } = req.params;
+  if (!isUuid(workoutId)) return res.status(400).json({ error: 'Invalid workout id.' });
+
+  const workout = await pool.query(
+    'SELECT id, name, type, description, wod_date FROM workouts WHERE id = $1', [workoutId]
+  );
+  if (!workout.rows[0]) return res.status(404).json({ error: 'Workout not found.' });
+
+  const result = await pool.query(
+    `SELECT r.user_id,
+            COALESCE(NULLIF(p.display_name, ''), 'Athlete') AS display_name,
+            p.gym_name,
+            r.time_seconds, r.rom_pct, r.unbroken_sets, r.holistic_score, r.created_at
+       FROM results r
+       JOIN users u    ON u.user_id = r.user_id
+       LEFT JOIN profiles p ON p.user_id = r.user_id
+      WHERE r.workout_id = $1
+      ORDER BY r.holistic_score DESC NULLS LAST, r.time_seconds ASC`,
+    [workoutId]
+  );
+
+  res.json({ workout: workout.rows[0], results: result.rows });
 }));
 
 // ---- Static + SPA -----------------------------------------------------------
