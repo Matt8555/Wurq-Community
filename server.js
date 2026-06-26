@@ -103,7 +103,40 @@ app.post('/api/users', wrap(async (req, res) => {
     created = false;
   }
 
-  res.status(created ? 201 : 200).json({ user_id: user.user_id, email: user.email, created });
+  // Fulfill any pending referral for this email when the friend first joins.
+  let referral = null;
+  if (created) {
+    const pend = await pool.query(
+      `SELECT id, referrer_user_id, box_id FROM referrals
+        WHERE lower(referred_email) = $1 AND status = 'pending' ORDER BY created_at ASC LIMIT 1`, [email]);
+    if (pend.rows[0]) {
+      const ref = pend.rows[0];
+      await pool.query(
+        `UPDATE referrals SET status = 'joined', referred_user_id = $2, points_awarded = $3 WHERE id = $1`,
+        [ref.id, user.user_id, REFERRER_POINTS]);
+      // Award both (one level only): referrer + a thank-you to the referred.
+      await pool.query('UPDATE profiles SET referral_points = referral_points + $2 WHERE user_id = $1', [ref.referrer_user_id, REFERRER_POINTS]);
+      await pool.query('UPDATE profiles SET referral_points = referral_points + $2 WHERE user_id = $1', [user.user_id, REFERRED_POINTS]);
+      // Land the new athlete in the referrer's box.
+      if (ref.box_id) {
+        const bx = await pool.query('SELECT name FROM boxes WHERE box_id = $1', [ref.box_id]);
+        await pool.query(
+          `INSERT INTO box_memberships (user_id, box_id) VALUES ($1, $2) ON CONFLICT (user_id, box_id) DO NOTHING`,
+          [user.user_id, ref.box_id]);
+        if (bx.rows[0]) await pool.query(
+          `UPDATE profiles SET gym_name = COALESCE(NULLIF(gym_name,''), $2) WHERE user_id = $1`, [user.user_id, bx.rows[0].name]);
+      }
+      const refName = (await pool.query(
+        `SELECT COALESCE(NULLIF(p.display_name,''),'A teammate') AS n FROM profiles p WHERE p.user_id = $1`,
+        [ref.referrer_user_id])).rows[0];
+      await pool.query(
+        `INSERT INTO feed_events (user_id, type, payload) VALUES ($1, 'referral_joined', $2)`,
+        [ref.referrer_user_id, JSON.stringify({ referred_email: email, points: REFERRER_POINTS })]);
+      referral = { referred_by: refName ? refName.n : 'A teammate', points: REFERRED_POINTS };
+    }
+  }
+
+  res.status(created ? 201 : 200).json({ user_id: user.user_id, email: user.email, created, referral });
 }));
 
 // ---- API: get profile -------------------------------------------------------
@@ -285,6 +318,15 @@ app.post('/api/results', wrap(async (req, res) => {
       improvement: prevSame - time_seconds });
   }
 
+  // Comeback detection — returning after a 7+ day gap.
+  const lastSeen = await pool.query(
+    `SELECT MAX(created_at) AS last FROM results WHERE user_id = $1 AND workout_id <> $2`, [userId, workoutId]);
+  let comeback = null;
+  if (lastSeen.rows[0].last) {
+    const gapDays = Math.floor((Date.now() - new Date(lastSeen.rows[0].last)) / 86400000);
+    if (gapDays >= 7) comeback = { gap_days: gapDays, message: `You're back after ${gapDays} days! 🔥` };
+  }
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -329,10 +371,16 @@ app.post('/api/results', wrap(async (req, res) => {
          JSON.stringify({ workout_name: workout.name, label: pr.label, message: pr.message })]);
     }
 
+    if (comeback) {
+      await client.query(
+        `INSERT INTO feed_events (user_id, type, ref_id, payload) VALUES ($1, 'comeback', $2, $3)`,
+        [userId, result.result_id, JSON.stringify({ gap_days: comeback.gap_days, workout_name: workout.name })]);
+    }
+
     const newBadges = await evaluateBadges(client, { userId, result, workout });
 
     await client.query('COMMIT');
-    res.status(201).json({ result, newBadges, prs });
+    res.status(201).json({ result, newBadges, prs, comeback });
   } catch (e) {
     await client.query('ROLLBACK');
     throw e;
@@ -971,6 +1019,199 @@ app.post('/api/shoutout', wrap(async (req, res) => {
        RETURNING event_id, created_at`,
     [fromUserId, toUserId, JSON.stringify({ to_user_id: toUserId, to_name: to.rows[0].name, text })]);
   res.status(201).json({ ok: true, event_id: rows[0].event_id, to_name: to.rows[0].name });
+}));
+
+// ---- API: referrals ---------------------------------------------------------
+const REFERRER_POINTS = 50, REFERRED_POINTS = 25;
+
+async function boxIdForUser(userId) {
+  const r = await pool.query(
+    `SELECT box_id FROM box_memberships WHERE user_id = $1 ORDER BY joined_at DESC LIMIT 1`, [userId]);
+  return r.rows[0] ? r.rows[0].box_id : null;
+}
+
+app.post('/api/referrals', wrap(async (req, res) => {
+  const b = req.body || {};
+  const referrerUserId = b.referrerUserId || b.referrer_user_id;
+  const email = typeof b.referredEmail === 'string' ? b.referredEmail.trim().toLowerCase() : '';
+  if (!isUuid(referrerUserId)) return res.status(400).json({ error: 'A valid referrerUserId is required.' });
+  if (!EMAIL_RE.test(email)) return res.status(400).json({ error: 'A valid friend email is required.' });
+  const u = await pool.query('SELECT 1 FROM users WHERE user_id = $1', [referrerUserId]);
+  if (!u.rows[0]) return res.status(404).json({ error: 'User not found.' });
+  const boxId = await boxIdForUser(referrerUserId);
+  const { rows } = await pool.query(
+    `INSERT INTO referrals (referrer_user_id, referred_email, status, box_id)
+       VALUES ($1, $2, 'pending', $3) RETURNING id, created_at`,
+    [referrerUserId, email, boxId]);
+  res.status(201).json({
+    id: rows[0].id, referred_email: email, status: 'pending',
+    invite_url: `https://wurq.io/join?ref=${rows[0].id}`,
+  });
+}));
+
+app.get('/api/users/:userId/referrals', wrap(async (req, res) => {
+  const { userId } = req.params;
+  if (!isUuid(userId)) return res.status(400).json({ error: 'Invalid user id.' });
+  const list = (await pool.query(
+    `SELECT r.id, r.referred_email, r.status, r.points_awarded, r.created_at,
+            COALESCE(NULLIF(p.display_name,''), NULL) AS referred_name
+       FROM referrals r LEFT JOIN profiles p ON p.user_id = r.referred_user_id
+      WHERE r.referrer_user_id = $1 ORDER BY r.created_at DESC`, [userId])).rows;
+  const points = (await pool.query(
+    `SELECT COALESCE(referral_points, 0) AS pts FROM profiles WHERE user_id = $1`, [userId])).rows[0];
+  res.json({
+    referrals: list,
+    points: points ? points.pts : 0,
+    joined_count: list.filter((r) => r.status === 'joined').length,
+    pending_count: list.filter((r) => r.status === 'pending').length,
+  });
+}));
+
+app.get('/api/box/:boxId/referral-leaderboard', wrap(async (req, res) => {
+  const { boxId } = req.params;
+  if (!isUuid(boxId)) return res.status(400).json({ error: 'Invalid box id.' });
+  const { rows } = await pool.query(
+    `SELECT r.referrer_user_id AS user_id,
+            COALESCE(NULLIF(p.display_name,''),'Athlete') AS display_name,
+            COUNT(*) FILTER (WHERE r.status = 'joined')::int AS joined,
+            COALESCE(MAX(p.referral_points), 0)::int AS points
+       FROM referrals r LEFT JOIN profiles p ON p.user_id = r.referrer_user_id
+      WHERE r.box_id = $1
+      GROUP BY r.referrer_user_id, p.display_name
+      ORDER BY joined DESC, points DESC LIMIT 20`, [boxId]);
+  res.json({ leaders: rows });
+}));
+
+// ---- API: global community (cross-box) --------------------------------------
+app.get('/api/global/feed', wrap(async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT f.event_id, f.user_id, f.type, f.payload, f.kudos, f.created_at,
+            COALESCE(NULLIF(p.display_name,''),'Athlete') AS display_name, b.name AS box_name
+       FROM feed_events f
+       LEFT JOIN profiles p ON p.user_id = f.user_id
+       LEFT JOIN box_memberships m ON m.user_id = f.user_id
+       LEFT JOIN boxes b ON b.box_id = m.box_id
+      ORDER BY f.created_at DESC LIMIT 60`);
+  res.json({ events: rows });
+}));
+
+app.get('/api/global/comebacks', wrap(async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT f.event_id, f.user_id, f.payload, f.kudos, f.created_at,
+            COALESCE(NULLIF(p.display_name,''),'Athlete') AS display_name, b.name AS box_name
+       FROM feed_events f
+       LEFT JOIN profiles p ON p.user_id = f.user_id
+       LEFT JOIN box_memberships m ON m.user_id = f.user_id
+       LEFT JOIN boxes b ON b.box_id = m.box_id
+      WHERE f.type = 'comeback' AND f.created_at >= now() - interval '7 days'
+      ORDER BY f.created_at DESC LIMIT 12`);
+  res.json({ comebacks: rows });
+}));
+
+app.get('/api/global/leaderboard/today/:workoutId', wrap(async (req, res) => {
+  const { workoutId } = req.params;
+  if (!isUuid(workoutId)) return res.status(400).json({ error: 'Invalid workout id.' });
+  const { rows } = await pool.query(
+    `SELECT r.user_id, COALESCE(NULLIF(p.display_name,''),'Athlete') AS display_name,
+            b.name AS box_name, r.holistic_score, r.time_seconds
+       FROM results r
+       LEFT JOIN profiles p ON p.user_id = r.user_id
+       LEFT JOIN box_memberships m ON m.user_id = r.user_id
+       LEFT JOIN boxes b ON b.box_id = m.box_id
+      WHERE r.workout_id = $1
+      ORDER BY r.holistic_score DESC NULLS LAST, r.time_seconds ASC LIMIT 50`, [workoutId]);
+  res.json({ results: rows });
+}));
+
+app.get('/api/global/leaderboard/overall', wrap(async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT r.user_id, COALESCE(NULLIF(p.display_name,''),'Athlete') AS display_name,
+            b.name AS box_name, ROUND(AVG(r.holistic_score), 1) AS avg_score, COUNT(*)::int AS sessions
+       FROM results r
+       LEFT JOIN profiles p ON p.user_id = r.user_id
+       LEFT JOIN box_memberships m ON m.user_id = r.user_id
+       LEFT JOIN boxes b ON b.box_id = m.box_id
+      GROUP BY r.user_id, p.display_name, b.name
+     HAVING COUNT(*) >= 5
+      ORDER BY avg_score DESC LIMIT 50`);
+  res.json({ results: rows.map((r) => ({ ...r, avg_score: Number(r.avg_score) })) });
+}));
+
+// ---- API: follows (cross-box) -----------------------------------------------
+app.post('/api/follows', wrap(async (req, res) => {
+  const b = req.body || {};
+  const follower = b.followerUserId || b.follower_user_id;
+  const followee = b.followeeUserId || b.followee_user_id;
+  if (!isUuid(follower) || !isUuid(followee)) return res.status(400).json({ error: 'Invalid id.' });
+  if (follower === followee) return res.status(400).json({ error: 'You can\'t follow yourself.' });
+  const action = b.action === 'unfollow' ? 'unfollow' : 'follow';
+  if (action === 'unfollow') {
+    await pool.query('DELETE FROM follows WHERE follower_user_id = $1 AND followee_user_id = $2', [follower, followee]);
+    return res.json({ ok: true, following: false });
+  }
+  await pool.query(
+    `INSERT INTO follows (follower_user_id, followee_user_id) VALUES ($1, $2)
+       ON CONFLICT (follower_user_id, followee_user_id) DO NOTHING`, [follower, followee]);
+  res.json({ ok: true, following: true });
+}));
+
+app.get('/api/users/:userId/following', wrap(async (req, res) => {
+  const { userId } = req.params;
+  if (!isUuid(userId)) return res.status(400).json({ error: 'Invalid user id.' });
+  const { rows } = await pool.query('SELECT followee_user_id FROM follows WHERE follower_user_id = $1', [userId]);
+  res.json({ following: rows.map((r) => r.followee_user_id) });
+}));
+
+app.get('/api/users/:userId/following-feed', wrap(async (req, res) => {
+  const { userId } = req.params;
+  if (!isUuid(userId)) return res.status(400).json({ error: 'Invalid user id.' });
+  const { rows } = await pool.query(
+    `SELECT f.event_id, f.user_id, f.type, f.payload, f.kudos, f.created_at,
+            COALESCE(NULLIF(p.display_name,''),'Athlete') AS display_name, b.name AS box_name
+       FROM feed_events f
+       JOIN follows fo ON fo.followee_user_id = f.user_id AND fo.follower_user_id = $1
+       LEFT JOIN profiles p ON p.user_id = f.user_id
+       LEFT JOIN box_memberships m ON m.user_id = f.user_id
+       LEFT JOIN boxes b ON b.box_id = m.box_id
+      ORDER BY f.created_at DESC LIMIT 50`, [userId]);
+  res.json({ events: rows });
+}));
+
+// ---- API: owner affiliate status --------------------------------------------
+const AFFILIATE_PERKS = {
+  Bronze: ['Featured in the WurQ app', 'Affiliate dashboard access'],
+  Silver: ['Everything in Bronze', 'Co-marketing features', 'Priority support'],
+  Gold: ['Everything in Silver', 'Revenue share on referrals', 'Annual WurQ summit invite'],
+};
+app.get('/api/box/:boxId/affiliate', wrap(async (req, res) => {
+  const { boxId } = req.params;
+  if (!isUuid(boxId)) return res.status(400).json({ error: 'Invalid box id.' });
+  const box = await pool.query('SELECT name FROM boxes WHERE box_id = $1', [boxId]);
+  if (!box.rows[0]) return res.status(404).json({ error: 'Box not found.' });
+
+  const m = (await pool.query(
+    `SELECT (SELECT COUNT(*)::int FROM box_memberships WHERE box_id = $1) AS members,
+            (SELECT COUNT(DISTINCT r.user_id)::int FROM results r JOIN box_memberships bm ON bm.user_id = r.user_id
+               WHERE bm.box_id = $1 AND r.created_at >= now() - interval '7 days') AS active_week,
+            (SELECT COUNT(DISTINCT (r.user_id, r.created_at::date))::int FROM results r JOIN box_memberships bm ON bm.user_id = r.user_id
+               WHERE bm.box_id = $1 AND r.created_at >= now() - interval '7 days') AS member_days_7,
+            (SELECT COUNT(*)::int FROM referrals WHERE box_id = $1 AND status = 'joined') AS referrals_joined,
+            (SELECT COALESCE(SUM(points_awarded),0)::int FROM referrals WHERE box_id = $1 AND status = 'joined') AS owner_referral_points`,
+    [boxId])).rows[0];
+
+  // Average daily turnout over the week — differentiates box engagement.
+  const participation = m.members ? m.member_days_7 / (m.members * 7) : 0;
+  const score = Math.round(participation * 100) + Math.min(m.referrals_joined, 10);
+  const tier = score >= 75 ? 'Gold' : score >= 50 ? 'Silver' : 'Bronze';
+  const nextTier = tier === 'Gold' ? null : tier === 'Silver' ? 'Gold' : 'Silver';
+  const nextThreshold = tier === 'Bronze' ? 50 : tier === 'Silver' ? 75 : null;
+  res.json({
+    box: box.rows[0].name, tier, score, participation: Math.round(participation * 100) / 100,
+    members: m.members, active_week: m.active_week,
+    referrals_joined: m.referrals_joined, owner_referral_points: m.owner_referral_points,
+    perks: AFFILIATE_PERKS[tier],
+    next_tier: nextTier, to_next: nextThreshold ? Math.max(0, nextThreshold - score) : 0,
+  });
 }));
 
 // ---- API: health / diagnostics (read-only) ----------------------------------

@@ -251,6 +251,25 @@ async function ensureDemoAthlete(p, idx = 0) {
     if (sq.rows[0]) await client.query(
       'INSERT INTO squad_members (squad_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [sq.rows[0].id, uid]);
 
+    // Demo referral data so "Bring a friend" is populated.
+    await client.query('DELETE FROM referrals WHERE referrer_user_id = $1', [uid]);
+    const mates = (await client.query(
+      `SELECT m.user_id, u.email FROM box_memberships m JOIN users u ON u.user_id = m.user_id
+        WHERE m.box_id = $1 AND m.user_id <> $2 LIMIT 2`, [boxId, uid])).rows;
+    let demoPts = 0;
+    for (const mate of mates) {
+      await client.query(
+        `INSERT INTO referrals (referrer_user_id, referred_email, referred_user_id, status, box_id, points_awarded, created_at)
+           VALUES ($1, $2, $3, 'joined', $4, 50, now() - interval '6 days')`,
+        [uid, mate.email, mate.user_id, boxId]);
+      demoPts += 50;
+    }
+    await client.query(
+      `INSERT INTO referrals (referrer_user_id, referred_email, status, box_id, created_at)
+         VALUES ($1, $2, 'pending', $3, now() - interval '1 days')`,
+      [uid, 'newfriend@example.com', boxId]);
+    await client.query('UPDATE profiles SET referral_points = $2 WHERE user_id = $1', [uid, demoPts]);
+
     const rows = [];
     for (const r of a.results) {
       const wid = widByDate[dayStr(r.k)];
@@ -355,6 +374,8 @@ async function main() {
     await client.query('BEGIN');
 
     // Reset the world (deterministic rebuild). FK-safe order.
+    await client.query('DELETE FROM follows');
+    await client.query('DELETE FROM referrals');
     await client.query('DELETE FROM feed_events');
     await client.query('DELETE FROM user_badges');
     await client.query('DELETE FROM squad_members');
@@ -566,6 +587,74 @@ async function main() {
           [uid, boxId, String(1 + i)]);
       }
     }
+
+    // ---- Referrals — community growth. Joined referrals link two members and
+    // award points; a few pending invites per box keep the funnel visible.
+    const refRows = [];
+    const refPoints = {}; // user_id -> referral_points
+    const add = (uid, pts) => { refPoints[uid] = (refPoints[uid] || 0) + pts; };
+    for (const box of BOX_DEFS) {
+      const boxId = boxIds[box.name];
+      const roster = athletes.filter((a) => a.boxName === box.name);
+      const joined = 5 + Math.floor(frng() * 6); // 5–10 joined referrals
+      for (let i = 0; i < joined; i++) {
+        const referrer = roster[Math.floor(frng() * roster.length)];
+        const referred = roster[Math.floor(frng() * roster.length)];
+        if (!referrer || !referred || referrer === referred) continue;
+        refRows.push([referrer.userId, referred.email, referred.userId, 'joined', boxId, 50, ts(Math.floor(frng() * DAYS))]);
+        add(referrer.userId, 50); add(referred.userId, 25);
+      }
+      for (let i = 0; i < 2; i++) {
+        const referrer = roster[Math.floor(frng() * roster.length)];
+        if (!referrer) continue;
+        refRows.push([referrer.userId, `friend${i}.${slug(box.name)}@example.com`, null, 'pending', boxId, 0, ts(Math.floor(frng() * 6))]);
+      }
+    }
+    await bulkInsert(client, 'referrals',
+      ['referrer_user_id', 'referred_email', 'referred_user_id', 'status', 'box_id', 'points_awarded', 'created_at'], refRows);
+    const rpRows = Object.entries(refPoints).map(([uid, pts]) => [uid, pts]);
+    // Apply referral_points to profiles (upsert-safe; profiles already exist).
+    for (let i = 0; i < rpRows.length; i += 500) {
+      const chunk = rpRows.slice(i, i + 500);
+      const vals = chunk.map((_, j) => `($${j * 2 + 1}::uuid, $${j * 2 + 2}::int)`).join(',');
+      await client.query(
+        `UPDATE profiles p SET referral_points = v.pts FROM (VALUES ${vals}) AS v(uid, pts)
+           WHERE p.user_id = v.uid`, chunk.flat());
+    }
+
+    // ---- Follows — cross-box connections so the global "following" feels alive.
+    const followRows = [];
+    const seenF = new Set();
+    const pushFollow = (a, b) => {
+      if (a === b) return; const key = a + '|' + b; if (seenF.has(key)) return;
+      seenF.add(key); followRows.push([a, b, ts(Math.floor(frng() * DAYS))]);
+    };
+    for (const a of athletes) {
+      if (frng() > 0.45) continue; // ~45% of athletes follow others
+      const others = athletes.filter((x) => x.boxName !== a.boxName);
+      const n = 1 + Math.floor(frng() * 3);
+      for (let i = 0; i < n; i++) pushFollow(a.userId, others[Math.floor(frng() * others.length)].userId);
+    }
+    // Ensure demo logins follow a few athletes at OTHER boxes.
+    for (const p of DEMO_ATHLETES) {
+      const me = athletes.find((x) => x.email === p.email); if (!me) continue;
+      const others = athletes.filter((x) => x.boxName !== HOME_BOX);
+      for (let i = 0; i < 4; i++) pushFollow(me.userId, others[Math.floor(frng() * others.length)].userId);
+    }
+    await bulkInsert(client, 'follows', ['follower_user_id', 'followee_user_id', 'created_at'], followRows,
+      'ON CONFLICT (follower_user_id, followee_user_id) DO NOTHING');
+
+    // ---- Comeback stories — athletes returning after a gap (emotional layer).
+    const comebackRows = [];
+    const pool2 = athletes.slice().sort(() => frng() - 0.5);
+    for (let i = 0; i < 12; i++) {
+      const a = pool2[i]; if (!a) continue;
+      const gap = 7 + Math.floor(frng() * 14);
+      comebackRows.push([a.userId, 'comeback',
+        JSON.stringify({ gap_days: gap, workout_name: 'Fran', seed: 'true' }),
+        8 + Math.floor(frng() * 25), ts(Math.floor(frng() * 5))]);
+    }
+    await bulkInsert(client, 'feed_events', ['user_id', 'type', 'payload', 'kudos', 'created_at'], comebackRows);
 
     await client.query('COMMIT');
   } catch (e) {

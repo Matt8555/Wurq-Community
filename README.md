@@ -94,12 +94,40 @@ one file so they are easy to tune.
 | GET | `/api/squads/:id/leaderboard/:workoutId` · `/api/squads/:id/feed` · `/api/squads/:id/quiet` | Squad mini-leaderboard, feed, and quiet members. |
 | POST | `/api/shoutout` | Post a shout-out crediting a teammate (writes a `shoutout` feed event). |
 | GET | `/api/box/:boxId/newcomers` · `/api/box/:boxId/members` | New-this-week members; box member list. |
+| POST | `/api/referrals` · GET `/api/users/:id/referrals` · GET `/api/box/:id/referral-leaderboard` | Create a referral; a user's referrals; per-box top referrers. |
+| GET | `/api/global/feed` · `/api/global/comebacks` | Cross-box activity feed; recent comebacks. |
+| GET | `/api/global/leaderboard/today/:workoutId` · `/api/global/leaderboard/overall` | WurQ-wide leaderboards (with box). |
+| POST | `/api/follows` · GET `/api/users/:id/following` · `/api/users/:id/following-feed` | Follow/unfollow; who you follow; cross-box following feed. |
+| GET | `/api/box/:boxId/affiliate` | Owner affiliate tier, referral points, perks. |
 | GET | `/api/boxes` | List boxes (id, name, location, member count). |
 | GET | `/api/workouts` | List workouts (for the challenge WOD picker). |
 | GET | `/api/owner/box/:boxId/dashboard` | Owner dashboard: participation, box-vs-box rank + rival gap, churn-risk members (quiet 10+ days), hot streaks. |
 | POST | `/api/challenges` | Create a throwdown (`challengerBoxId`, `opponentBoxId`, `workoutId`, `startsAt`, `endsAt`). |
 | GET | `/api/challenges/box/:boxId` | List a box's challenges (as challenger or opponent). |
 | GET | `/api/challenges/:id/standing` | Head-to-head: each box's avg score × participation for the challenge WOD, within the window. |
+
+## Referrals, global community & affiliate status
+
+The platform tells the full story — individual → squad → box → box-vs-box →
+whole community — with growth and emotional support woven through:
+
+- **Referrals** (`referrals` table, `profiles.referral_points`): a "Bring a
+  friend" screen (in Community → Box) generates an invite; when the friend signs
+  up with that email, both earn points, the friend lands in the referrer's box,
+  and a `referral_joined` feed event fires. One level only. There's a per-box
+  top-referrers board.
+- **Global community** (Community → **Global**): a cross-box activity feed,
+  global leaderboards (today's WOD + overall, with each athlete's box), and the
+  ability to **follow** and send **kudos** to athletes at *other* boxes
+  (`follows` table). A "Following" tab shows people you follow across boxes.
+- **Comebacks** (`comeback` feed events): returning after a 7+ day gap fires a
+  celebratory comeback (shown in a "Comebacks this week" strip and the log
+  screen), with a one-tap "Lift up" community encouragement.
+- **Owner affiliate status**: the owner dashboard shows a Bronze/Silver/Gold
+  **WurQ affiliate** tier (from weekly turnout + referrals), owner referral
+  points, progress to the next tier, and perks.
+
+Supporting data (referrals, follows, comebacks) is seeded across the population.
 
 ## Community & engagement
 

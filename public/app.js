@@ -19,7 +19,10 @@ let currentView = 'profile';     // 'profile' | 'log' | 'leaderboard' | 'communi
 let todayWorkout = null;
 let lbTab = 'box';               // 'box' | 'boxes'
 let communitySpace = 'all';      // selected Circle space (mock)
-let communityTab = 'hub';        // 'hub' (engagement) | 'circle' (mock embed)
+let communityTab = 'box';        // 'box' (engagement) | 'global' | 'circle' (mock embed)
+let globalTab = 'feed';          // 'feed' | 'top' | 'following'
+let globalScope = 'today';       // global leaderboard scope: 'today' | 'overall'
+let followingSet = null;         // Set of user_ids the current user follows
 const likedPosts = new Set();    // client-only like state for the Circle mock
 let pendingAvatarUrl = null;
 
@@ -652,8 +655,8 @@ async function renderLog() {
       const resp = await api('POST', '/api/results', {
         userId, workoutId: w.workout_id, time_seconds, rom_pct, unbroken_sets,
       });
-      showToast(resp.prs && resp.prs.length ? 'New PR! 🎉' : 'Logged ✓');
-      renderLogged(resp.result, w, resp.newBadges || [], resp.prs || []);
+      showToast(resp.prs && resp.prs.length ? 'New PR! 🎉' : (resp.comeback ? 'Welcome back! 🔥' : 'Logged ✓'));
+      renderLogged(resp.result, w, resp.newBadges || [], resp.prs || [], resp.comeback);
     } catch (e) {
       err.textContent = e.message;
       btn.disabled = false; btn.textContent = 'Log result';
@@ -671,14 +674,15 @@ function countUp(node, target) {
   requestAnimationFrame(step);
 }
 
-function renderLogged(saved, w, newBadges, prs) {
+function renderLogged(saved, w, newBadges, prs, comeback) {
   prs = prs || [];
   const score = Number(saved.holistic_score);
   content.innerHTML = '';
   content.appendChild(el(`
     <div>
-      <h1 class="title">${prs.length ? 'New PR! 🎉' : 'Nice work!'}</h1>
+      <h1 class="title">${prs.length ? 'New PR! 🎉' : (comeback ? 'You\'re back! 🔥' : 'Nice work!')}</h1>
       <p class="subtitle">${escapeHtml(w.name)} · ${fmtTime(saved.time_seconds)} · ${Math.round(saved.rom_pct)}% ROM</p>
+      ${comeback ? `<div class="pr-celebrate"><div class="pc-burst">🔥</div><div class="pc-title">Comeback</div><div class="pc-msg">${escapeHtml(comeback.message || 'Welcome back!')}</div></div>` : ''}
       ${prs.map((pr) => `
         <div class="pr-celebrate">
           <div class="pc-burst">🎉</div>
@@ -826,6 +830,12 @@ function feedText(ev) {
   if (ev.type === 'shoutout') {
     return `${name} gave a shout-out to <span class="accent">${escapeHtml(p.to_name || 'a teammate')}</span> 🙌<div class="feed-post">“${escapeHtml(p.text || '')}”</div>`;
   }
+  if (ev.type === 'comeback') {
+    return `${name} <span class="accent">is back! 🔥</span> returned after ${p.gap_days || 7}+ days and logged ${escapeHtml(p.workout_name || 'a WOD')}`;
+  }
+  if (ev.type === 'referral_joined') {
+    return `${name} grew the box — a friend just joined 🎉 <span class="accent">+${p.points || 50} pts</span>`;
+  }
   return `${name} did something`;
 }
 
@@ -951,8 +961,9 @@ function renderCommunity() {
   content.innerHTML = '';
   const wrap = el(`
     <div>
-      <div class="tabs" id="commTabs">
-        <button data-ct="hub">Community</button>
+      <div class="tabs tabs3" id="commTabs">
+        <button data-ct="box">Box</button>
+        <button data-ct="global">Global</button>
         <button data-ct="circle">Circle</button>
       </div>
       <div id="commBody"></div>
@@ -967,6 +978,7 @@ function renderCommunity() {
   });
   const body = wrap.querySelector('#commBody');
   if (communityTab === 'circle') return renderCircleInto(body);
+  if (communityTab === 'global') return renderGlobalInto(body);
   return renderCommunityHub(body);
 }
 
@@ -980,6 +992,20 @@ function teamGoalCardHtml(g) {
       <div class="goal-bar"><span style="width:${g.pct}%"></span></div>
       <div class="goal-sub"><b>${g.remaining}</b> to go · ${g.contributors} contributors</div>
       ${top ? `<div class="goal-top">🔝 Top: ${top}</div>` : ''}
+    </div>`;
+}
+
+function affiliateCardHtml(a) {
+  const medal = a.tier === 'Gold' ? '🥇' : a.tier === 'Silver' ? '🥈' : '🥉';
+  return `
+    <div class="affiliate-card tier-${a.tier.toLowerCase()}">
+      <div class="aff-top">
+        <div class="aff-tier">${medal} ${a.tier} affiliate</div>
+        <div class="aff-pts">${a.owner_referral_points} referral pts</div>
+      </div>
+      <div class="aff-sub">${Math.round(a.participation * 100)}% weekly turnout · ${a.referrals_joined} referrals joined</div>
+      <div class="aff-next">${a.next_tier ? `<b>${a.to_next}</b> pts to ${a.next_tier} ${a.next_tier === 'Gold' ? '🥇' : '🥈'}` : 'Top tier reached 🏆'}</div>
+      <div class="aff-perks">${a.perks.map((p) => `<span class="aff-perk">✓ ${escapeHtml(p)}</span>`).join('')}</div>
     </div>`;
 }
 
@@ -1027,6 +1053,7 @@ async function renderCommunityHub(container) {
   const wrap = el(`
     <div>
       ${goal ? teamGoalCardHtml(goal) : ''}
+      <button class="btn-primary" id="bringFriend">🤝 Bring a friend — grow your box</button>
       <button class="btn-outline wide" id="giveShout">🙌 Give a shout-out</button>
       <div id="shoutComposer"></div>
       <div class="sec-title">Squads in ${escapeHtml(profile.box_name || 'your box')}</div>
@@ -1076,6 +1103,227 @@ async function renderCommunityHub(container) {
 
   wrap.querySelector('#giveShout').addEventListener('click', () =>
     openShoutComposer(wrap.querySelector('#shoutComposer'), members));
+  wrap.querySelector('#bringFriend').addEventListener('click', () => renderReferral());
+}
+
+// "Bring a friend" — referral screen.
+async function renderReferral() {
+  setScreenName('Refer');
+  content.innerHTML = '<p class="subtitle">Loading…</p>';
+  let data, leaders;
+  try {
+    [data, leaders] = await Promise.all([
+      api('GET', `/api/users/${userId}/referrals`),
+      profile.box_id ? api('GET', `/api/box/${profile.box_id}/referral-leaderboard`).then((r) => r.leaders) : Promise.resolve([]),
+    ]);
+  } catch (e) { content.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+
+  const myRank = leaders.findIndex((l) => l.user_id === userId);
+  content.innerHTML = '';
+  const wrap = el(`
+    <div>
+      <button class="back-link" id="back">← Community</button>
+      <h1 class="title">Bring a friend</h1>
+      <p class="subtitle">Grow your box. When a friend joins, you both earn points.</p>
+
+      <div class="pr-grid" style="grid-template-columns:1fr 1fr">
+        <div class="pr-card"><div class="pr-v">${data.points}</div><div class="pr-l">Referral points</div></div>
+        <div class="pr-card"><div class="pr-v">${myRank >= 0 ? '#' + (myRank + 1) : '—'}</div><div class="pr-l">Rank in your box</div></div>
+      </div>
+
+      <div class="card">
+        <label class="field"><span class="lbl">Invite a friend by email</span>
+          <input type="email" id="refEmail" placeholder="friend@email.com" autocomplete="off" /></label>
+        <button class="btn-primary" id="sendInvite">Send invite</button>
+        <div id="inviteOut"></div>
+        <div class="error" id="refErr"></div>
+      </div>
+
+      <div class="sec-title">Your invites (${data.joined_count} joined · ${data.pending_count} pending)</div>
+      <div id="myRefs"></div>
+
+      <div class="sec-title">🏆 Top referrers in your box</div>
+      <div id="refBoard"></div>
+    </div>
+  `);
+  content.appendChild(wrap);
+
+  const myRefsEl = wrap.querySelector('#myRefs');
+  if (!data.referrals.length) myRefsEl.appendChild(el('<div class="muted-note">No invites yet — send your first above.</div>'));
+  data.referrals.forEach((r) => myRefsEl.appendChild(el(`
+    <div class="list-row">
+      <div class="lr-main"><div class="nm">${escapeHtml(r.referred_name || r.referred_email)}</div>
+        <div class="meta">${r.status === 'joined' ? `joined · +${r.points_awarded} pts` : 'invite pending'}</div></div>
+      <div class="${r.status === 'joined' ? 'pill-hot' : 'pill-warn'}">${r.status === 'joined' ? 'Joined' : 'Pending'}</div>
+    </div>`)));
+
+  const boardEl = wrap.querySelector('#refBoard');
+  if (!leaders.length) boardEl.appendChild(el('<div class="muted-note">No referrals in your box yet.</div>'));
+  leaders.slice(0, 10).forEach((l, i) => boardEl.appendChild(el(`
+    <div class="lb-row ${l.user_id === userId ? 'me' : ''}">
+      <div class="lb-rank">${i + 1}</div>
+      <div class="lb-main"><div class="lb-name">${escapeHtml(l.display_name)}${l.user_id === userId ? ' · you' : ''}</div>
+        <div class="lb-sub">${l.joined} joined</div></div>
+      <div class="lb-score"><div class="s">${l.points}</div><div class="t">pts</div></div>
+    </div>`)));
+
+  const err = wrap.querySelector('#refErr');
+  const out = wrap.querySelector('#inviteOut');
+  const btn = wrap.querySelector('#sendInvite');
+  btn.addEventListener('click', async () => {
+    err.textContent = ''; out.innerHTML = '';
+    const email = wrap.querySelector('#refEmail').value.trim();
+    if (!email) { err.textContent = 'Enter a friend\'s email.'; return; }
+    btn.disabled = true; btn.textContent = 'Sending…';
+    try {
+      const r = await api('POST', '/api/referrals', { referrerUserId: userId, referredEmail: email });
+      showToast('Invite created 🤝');
+      out.appendChild(el(`<div class="invite-link">Invite link<br/><b>${escapeHtml(r.invite_url)}</b></div>`));
+      wrap.querySelector('#refEmail').value = '';
+      btn.disabled = false; btn.textContent = 'Send invite';
+    } catch (e) { err.textContent = e.message; btn.disabled = false; btn.textContent = 'Send invite'; }
+  });
+  wrap.querySelector('#back').addEventListener('click', () => setView('community'));
+}
+
+// ---- Global community (cross-box) -------------------------------------------
+async function ensureFollowing() {
+  if (followingSet) return;
+  try { followingSet = new Set((await api('GET', `/api/users/${userId}/following`)).following); }
+  catch (_) { followingSet = new Set(); }
+}
+function makeFollowButton(uid) {
+  if (uid === userId) return null;
+  const following = followingSet.has(uid);
+  const btn = el(`<button class="follow-btn ${following ? 'following' : ''}">${following ? 'Following' : '+ Follow'}</button>`);
+  btn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const isF = followingSet.has(uid);
+    try {
+      await api('POST', '/api/follows', { followerUserId: userId, followeeUserId: uid, action: isF ? 'unfollow' : 'follow' });
+      if (isF) followingSet.delete(uid); else followingSet.add(uid);
+      btn.classList.toggle('following', !isF); btn.textContent = !isF ? 'Following' : '+ Follow';
+    } catch (err) { showToast(err.message); }
+  });
+  return btn;
+}
+function globalFeedItemEl(ev) {
+  const isCb = ev.type === 'comeback';
+  const item = el(`
+    <div class="feed-item ${isCb ? 'feed-comeback' : ''}">
+      ${avatarHtml(ev.avatar_url, ev.display_name, 'feed-av')}
+      <div class="feed-body">
+        <div class="feed-text">${feedText(ev)}</div>
+        ${ev.box_name ? `<div class="gf-box">${escapeHtml(ev.box_name)}</div>` : ''}
+        <div class="feed-meta">
+          <span class="feed-time">${timeAgo(ev.created_at)}</span>
+          <button class="kudos">${isCb ? '💪 Lift up' : '👏'} <span class="kudos-n">${ev.kudos}</span></button>
+          <span class="gf-follow"></span>
+        </div>
+      </div>
+    </div>`);
+  item.querySelector('.kudos').addEventListener('click', async () => {
+    try {
+      const r = await api('POST', `/api/feed/${ev.event_id}/kudos`);
+      item.querySelector('.kudos-n').textContent = r.kudos;
+      item.querySelector('.kudos').classList.add('kudosed');
+      if (isCb) showToast(`Lifted up ${ev.display_name.split(' ')[0]} 💪`);
+    } catch (e) { showToast(e.message); }
+  });
+  const fb = makeFollowButton(ev.user_id);
+  if (fb) item.querySelector('.gf-follow').appendChild(fb);
+  return item;
+}
+
+async function renderGlobalInto(container) {
+  if (!userId) { container.innerHTML = '<div class="empty">Set up your profile to join the community.</div>'; return; }
+  container.innerHTML = '';
+  const wrap = el(`
+    <div>
+      <div class="tabs tabs3" id="gTabs">
+        <button data-gt="feed">Feed</button>
+        <button data-gt="top">Top</button>
+        <button data-gt="following">Following</button>
+      </div>
+      <div id="gBody"></div>
+    </div>`);
+  container.appendChild(wrap);
+  const t = wrap.querySelector('#gTabs');
+  t.querySelectorAll('button').forEach((b) => b.classList.toggle('active', b.dataset.gt === globalTab));
+  t.addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; globalTab = b.dataset.gt; renderGlobalInto(container); });
+  const body = wrap.querySelector('#gBody');
+  await ensureFollowing();
+  if (globalTab === 'top') return renderGlobalTop(body);
+  if (globalTab === 'following') return renderGlobalFollowing(body);
+  return renderGlobalFeed(body);
+}
+
+async function renderGlobalFeed(body) {
+  body.innerHTML = '<p class="subtitle">Loading…</p>';
+  let events, comebacks;
+  try {
+    [events, comebacks] = await Promise.all([
+      api('GET', '/api/global/feed').then((r) => r.events),
+      api('GET', '/api/global/comebacks').then((r) => r.comebacks),
+    ]);
+  } catch (e) { body.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+  body.innerHTML = '';
+  if (comebacks.length) {
+    const strip = el(`<div class="comeback-strip"><div class="cb-title">🔥 Comebacks this week</div><div class="cb-list"></div></div>`);
+    const cl = strip.querySelector('.cb-list');
+    comebacks.forEach((c) => cl.appendChild(el(`<div class="cb-chip"><b>${escapeHtml(c.display_name.split(' ')[0])}</b> is back<span class="cb-box">${escapeHtml(c.box_name || '')}</span></div>`)));
+    body.appendChild(strip);
+  }
+  const list = el('<div></div>'); body.appendChild(list);
+  events.forEach((ev) => list.appendChild(globalFeedItemEl(ev)));
+}
+
+async function renderGlobalTop(body) {
+  body.innerHTML = '<p class="subtitle">Loading…</p>';
+  let rows = [], w = null;
+  try {
+    if (globalScope === 'overall') rows = await api('GET', '/api/global/leaderboard/overall').then((r) => r.results);
+    else { w = await ensureWorkout(); rows = await api('GET', `/api/global/leaderboard/today/${w.workout_id}`).then((r) => r.results); }
+  } catch (e) { body.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+  body.innerHTML = '';
+  const head = el(`<div>
+    <div class="tabs" id="scope"><button data-s="today">Today's WOD</button><button data-s="overall">Overall</button></div>
+    <div id="rows"></div></div>`);
+  body.appendChild(head);
+  const sc = head.querySelector('#scope');
+  sc.querySelectorAll('button').forEach((b) => b.classList.toggle('active', b.dataset.s === globalScope));
+  sc.addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; globalScope = b.dataset.s; renderGlobalTop(body); });
+  const rowsEl = head.querySelector('#rows');
+  if (!rows.length) rowsEl.appendChild(el('<div class="muted-note">No results yet.</div>'));
+  rows.forEach((r, i) => {
+    const me = r.user_id === userId;
+    const row = el(`
+      <div class="lb-row ${me ? 'me' : ''}">
+        <div class="lb-rank">${i + 1}</div>
+        <div class="lb-main"><div class="lb-name">${escapeHtml(r.display_name)}${me ? ' · you' : ''}</div>
+          <div class="lb-sub">${escapeHtml(r.box_name || '')}</div></div>
+        <div class="lb-score"><div class="s">${globalScope === 'overall' ? r.avg_score : num(r.holistic_score)}</div>
+          <div class="t">${globalScope === 'overall' ? 'avg' : fmtTime(r.time_seconds)}</div></div>
+        <span class="lb-follow"></span>
+      </div>`);
+    const fb = makeFollowButton(r.user_id);
+    if (fb) row.querySelector('.lb-follow').appendChild(fb);
+    rowsEl.appendChild(row);
+  });
+}
+
+async function renderGlobalFollowing(body) {
+  body.innerHTML = '<p class="subtitle">Loading…</p>';
+  let events;
+  try { events = await api('GET', `/api/users/${userId}/following-feed`).then((r) => r.events); }
+  catch (e) { body.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+  body.innerHTML = '';
+  if (!events.length) {
+    body.appendChild(el(`<div class="empty">You're not following anyone yet.<br/>Tap <b>+ Follow</b> on athletes in the Feed or Top tabs to build your cross-box feed.</div>`));
+    return;
+  }
+  const list = el('<div></div>'); body.appendChild(list);
+  events.forEach((ev) => list.appendChild(globalFeedItemEl(ev)));
 }
 
 function openShoutComposer(container, members) {
@@ -1277,11 +1525,12 @@ async function renderOwner() {
 async function renderOwnerHome() {
   setScreenName('Dashboard');
   content.innerHTML = '<p class="subtitle">Loading…</p>';
-  let d, goal;
+  let d, goal, aff;
   try {
-    [d, goal] = await Promise.all([
+    [d, goal, aff] = await Promise.all([
       api('GET', `/api/owner/box/${ownerBox.box_id}/dashboard`),
       api('GET', `/api/box/${ownerBox.box_id}/team-goal`).then((r) => r.goal).catch(() => null),
+      api('GET', `/api/box/${ownerBox.box_id}/affiliate`).catch(() => null),
     ]);
   } catch (e) { content.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
 
@@ -1312,6 +1561,8 @@ async function renderOwnerHome() {
           : 'Top of the standings 🏆'}</div>
         <button class="btn-outline" id="toCompete">View competition →</button>
       </div>` : ''}
+
+      ${aff ? `<div class="sec-title">🏅 WurQ affiliate status</div>${affiliateCardHtml(aff)}` : ''}
 
       ${goal ? `<div class="sec-title">🎯 Team goal</div>${teamGoalCardHtml(goal)}` : ''}
 
@@ -1542,6 +1793,7 @@ async function renderOwnerEngage() {
 
 // ---- bootstrap --------------------------------------------------------------
 async function loadProfile() {
+  followingSet = null; // refresh follow state for this login
   try { profile = await api('GET', `/api/profile/${userId}`); }
   catch (e) { localStorage.removeItem(STORAGE_KEY); userId = null; profile = null; }
   go();

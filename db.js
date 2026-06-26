@@ -44,6 +44,7 @@ const SCHEMA_SQL = `
     primary_goals    TEXT,
     units            TEXT NOT NULL DEFAULT 'lb',
     profile_complete BOOLEAN NOT NULL DEFAULT false,
+    referral_points  INTEGER NOT NULL DEFAULT 0,
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
   );
 
@@ -177,6 +178,31 @@ const SCHEMA_SQL = `
     status    TEXT NOT NULL DEFAULT 'active'
   );
   CREATE INDEX IF NOT EXISTS idx_team_goals_box ON team_goals(box_id);
+
+  -- Referrals: one level only (referrer + referred), community-framed growth.
+  CREATE TABLE IF NOT EXISTS referrals (
+    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    referrer_user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    referred_email   TEXT NOT NULL,
+    referred_user_id UUID REFERENCES users(user_id) ON DELETE SET NULL,
+    status           TEXT NOT NULL DEFAULT 'pending',   -- pending | joined
+    box_id           UUID REFERENCES boxes(box_id) ON DELETE SET NULL,
+    points_awarded   INTEGER NOT NULL DEFAULT 0,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals(referrer_user_id);
+  CREATE INDEX IF NOT EXISTS idx_referrals_box      ON referrals(box_id);
+  CREATE INDEX IF NOT EXISTS idx_referrals_email    ON referrals(lower(referred_email));
+
+  -- Cross-box follows ("belonging with no walls").
+  CREATE TABLE IF NOT EXISTS follows (
+    follower_user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    followee_user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (follower_user_id, followee_user_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_follows_follower ON follows(follower_user_id);
+  CREATE INDEX IF NOT EXISTS idx_follows_followee ON follows(followee_user_id);
 `;
 
 // Idempotent fixups for databases created by earlier versions of this app:
@@ -202,6 +228,8 @@ const FIXUP_SQL = `
   ALTER TABLE results ADD COLUMN IF NOT EXISTS power_output NUMERIC(7,1);
   ALTER TABLE results ADD COLUMN IF NOT EXISTS work_volume  NUMERIC(9,1);
   ALTER TABLE results ADD COLUMN IF NOT EXISTS movements    JSONB NOT NULL DEFAULT '[]'::jsonb;
+
+  ALTER TABLE profiles ADD COLUMN IF NOT EXISTS referral_points INTEGER NOT NULL DEFAULT 0;
 `;
 
 // Ensure there is a "Fran" workout for today (idempotent).
