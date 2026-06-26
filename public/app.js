@@ -22,6 +22,13 @@ let communitySpace = 'all';      // selected Circle space (mock)
 const likedPosts = new Set();    // client-only like state for the Circle mock
 let pendingAvatarUrl = null;
 
+// Role (athlete vs gym owner). For the demo, the owner owns OWNER_BOX_NAME.
+const OWNER_BOX_NAME = 'CrossFit Borderland';
+let role = localStorage.getItem('wurq_role') === 'owner' ? 'owner' : 'athlete';
+let ownerView = 'home';          // 'home' | 'compete' | 'throwdown' | 'engage'
+let ownerBox = null;             // resolved {box_id, name, location}
+const roleToggleEl = document.getElementById('roleToggle');
+
 // ---- helpers ----------------------------------------------------------------
 function el(html) {
   const t = document.createElement('template');
@@ -94,15 +101,53 @@ function avatarHtml(url, name, cls) {
 }
 function num(v) { return Number(v); }
 
-// ---- routing ----------------------------------------------------------------
-function setScreenName(name) { screenNameEl.textContent = name; }
+// ---- routing (role-aware) ---------------------------------------------------
+function setScreenName(name) { if (screenNameEl) screenNameEl.textContent = name; }
+
+const NAV_ATHLETE = [
+  ['log', '▦', 'WOD'], ['leaderboard', '≡', 'Board'],
+  ['community', '❖', 'Community'], ['feed', '✦', 'Feed'], ['profile', '◉', 'Profile'],
+];
+const NAV_OWNER = [
+  ['home', '◧', 'Home'], ['compete', '≡', 'Compete'],
+  ['throwdown', '⚔', 'Throwdown'], ['engage', '✦', 'Engage'],
+];
+
+function renderNav() {
+  const items = role === 'owner' ? NAV_OWNER : NAV_ATHLETE;
+  const active = role === 'owner' ? ownerView : currentView;
+  navEl.innerHTML = items.map(([v, ic, lbl]) =>
+    `<a href="#" data-view="${v}" class="${v === active ? 'active' : ''}"><span class="ico">${ic}</span>${lbl}</a>`).join('');
+}
+
+function updateRoleToggle() {
+  if (!roleToggleEl) return;
+  roleToggleEl.querySelectorAll('button').forEach((b) =>
+    b.classList.toggle('active', b.dataset.role === role));
+}
+
+// Render the current screen for the current role.
+function go() {
+  renderNav();
+  updateRoleToggle();
+  if (role === 'owner') return renderOwner();
+  return render();
+}
 
 function setView(view) {
   if (view !== 'profile' && !userId) { showToast('Set up your profile first'); view = 'profile'; }
   currentView = view;
-  navEl.querySelectorAll('a[data-view]').forEach((a) =>
-    a.classList.toggle('active', a.dataset.view === view));
-  render();
+  go();
+}
+
+function setOwnerView(view) { ownerView = view; go(); }
+
+function setRole(r) {
+  role = r === 'owner' ? 'owner' : 'athlete';
+  localStorage.setItem('wurq_role', role);
+  if (role === 'owner') ownerView = 'home';
+  else currentView = profile && profile.profile_complete ? 'log' : 'profile';
+  go();
 }
 
 function render() {
@@ -117,8 +162,15 @@ navEl.addEventListener('click', (e) => {
   const a = e.target.closest('a[data-view]');
   if (!a) return;
   e.preventDefault();
-  setView(a.dataset.view);
+  if (role === 'owner') setOwnerView(a.dataset.view); else setView(a.dataset.view);
 });
+
+if (roleToggleEl) {
+  roleToggleEl.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-role]');
+    if (b) setRole(b.dataset.role);
+  });
+}
 
 // Prompt shown when a box-scoped screen needs a gym that isn't set yet.
 function needBoxPrompt(msg) {
@@ -722,16 +774,279 @@ function renderCommunity() {
   });
 }
 
-// ---- bootstrap --------------------------------------------------------------
-async function loadProfile() {
+// ============================================================================
+// Owner view — the gym-owner perspective (dashboard, competition, throwdowns,
+// engagement). For the demo the owner owns OWNER_BOX_NAME ("CrossFit
+// Borderland"); its box_id is resolved from /api/boxes.
+// ============================================================================
+function ymd(d) { const z = (n) => String(n).padStart(2, '0'); return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())}`; }
+function pct(x) { return Math.round((Number(x) || 0) * 100); }
+
+async function loadOwnerBox() {
   try {
-    profile = await api('GET', `/api/profile/${userId}`);
-    render();
-  } catch (e) {
-    localStorage.removeItem(STORAGE_KEY);
-    userId = null; profile = null;
-    renderEmailGate();
-  }
+    const { boxes } = await api('GET', '/api/boxes');
+    ownerBox = boxes.find((b) => b.name === OWNER_BOX_NAME) || null;
+  } catch (e) { ownerBox = null; }
 }
 
-if (userId) loadProfile(); else renderEmailGate();
+async function renderOwner() {
+  if (!ownerBox) {
+    content.innerHTML = '<p class="subtitle">Loading…</p>';
+    await loadOwnerBox();
+    if (!ownerBox) {
+      content.innerHTML = `<div class="empty">Owner box "${escapeHtml(OWNER_BOX_NAME)}" not found.<br/>Run <code>npm run seed</code> to populate the demo world.</div>`;
+      return;
+    }
+  }
+  if (ownerView === 'compete') return renderOwnerCompete();
+  if (ownerView === 'throwdown') return renderOwnerThrowdown();
+  if (ownerView === 'engage') return renderOwnerEngage();
+  return renderOwnerHome();
+}
+
+async function renderOwnerHome() {
+  setScreenName('Dashboard');
+  content.innerHTML = '<p class="subtitle">Loading…</p>';
+  let d;
+  try { d = await api('GET', `/api/owner/box/${ownerBox.box_id}/dashboard`); }
+  catch (e) { content.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+
+  const p = d.participation, r = d.rank;
+  content.innerHTML = '';
+  const wrap = el(`
+    <div>
+      <h1 class="title">Box dashboard</h1>
+      <p class="subtitle">${escapeHtml(d.box.name)}${d.box.location ? ' · ' + escapeHtml(d.box.location) : ''}</p>
+
+      <div class="card hero">
+        <div class="big">${p.trained_today}</div>
+        <div class="lab">members trained today</div>
+        <div class="stat-row">
+          <div class="mini-stat"><div class="n">${p.trained_week}</div><div class="l">This week</div></div>
+          <div class="mini-stat"><div class="n">${p.total_members}</div><div class="l">Members</div></div>
+          <div class="mini-stat"><div class="n">${pct(p.trained_week / Math.max(p.total_members, 1))}%</div><div class="l">Weekly active</div></div>
+        </div>
+      </div>
+
+      ${r ? `<div class="rank-card">
+        <div class="rc-top">
+          <div class="pos">#${r.position}<span class="of"> / ${r.total_boxes}</span></div>
+          <div class="rc-meta">Box vs Box<br/>${escapeHtml(r.workout_name)}</div>
+        </div>
+        <div class="rc-gap">${r.ahead
+          ? `<b>${r.ahead.gap}</b> points behind <b>${escapeHtml(r.ahead.name)}</b>`
+          : 'Top of the standings 🏆'}</div>
+        <button class="btn-outline" id="toCompete">View competition →</button>
+      </div>` : ''}
+
+      <div class="sec-title danger-title">⚠ Members going quiet</div>
+      <div id="churn"></div>
+
+      <div class="sec-title">🔥 On a hot streak this week</div>
+      <div id="streaks"></div>
+    </div>
+  `);
+  content.appendChild(wrap);
+
+  const churnEl = wrap.querySelector('#churn');
+  if (!d.churn.length) churnEl.appendChild(el(`<div class="empty">Everyone's been active lately 🎉</div>`));
+  d.churn.forEach((c) => churnEl.appendChild(el(`
+    <div class="list-row warn">
+      <div class="lr-main"><div class="nm">${escapeHtml(c.display_name)}</div>
+        <div class="meta">${c.days_since == null ? 'No logs yet' : 'Last trained ' + c.days_since + ' days ago'}</div></div>
+      <div class="pill-warn">${c.days_since == null ? 'inactive' : c.days_since + 'd'}</div>
+    </div>`)));
+
+  const streakEl = wrap.querySelector('#streaks');
+  if (!d.streaks.length) streakEl.appendChild(el(`<div class="empty">No multi-day streaks yet this week.</div>`));
+  d.streaks.forEach((s) => streakEl.appendChild(el(`
+    <div class="list-row">
+      <div class="lr-main"><div class="nm">${escapeHtml(s.display_name)}</div></div>
+      <div class="pill-hot">${s.days_this_week} days 🔥</div>
+    </div>`)));
+
+  const cmp = wrap.querySelector('#toCompete');
+  if (cmp) cmp.addEventListener('click', () => setOwnerView('compete'));
+}
+
+async function renderOwnerCompete() {
+  setScreenName('Compete');
+  content.innerHTML = '<p class="subtitle">Loading…</p>';
+  let w, data;
+  try { w = await ensureWorkout(); data = await api('GET', `/api/leaderboard/boxes/${w.workout_id}`); }
+  catch (e) { content.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+
+  const boxes = data.boxes || [];
+  const myIdx = boxes.findIndex((b) => b.box_id === ownerBox.box_id);
+  const me = myIdx >= 0 ? boxes[myIdx] : null;
+  const above = myIdx > 0 ? boxes[myIdx - 1] : null;
+
+  let action = '';
+  if (me && above) {
+    const avg = me.avg_score || 1;
+    const needLogged = Math.floor((above.score * me.total_members) / avg) + 1;
+    const n = Math.max(1, needLogged - me.logged_members);
+    action = `Log <b>${n}</b> more ${escapeHtml(w.name)} ${n === 1 ? 'result' : 'results'} to pass <b>${escapeHtml(above.name)}</b> — your turnout ${pct(me.participation)}% vs their ${pct(above.participation)}%.`;
+  } else if (me && myIdx === 0) {
+    action = `You're <b>#1</b> 🏆 — keep turnout high to hold the top spot.`;
+  }
+
+  content.innerHTML = '';
+  const wrap = el(`
+    <div>
+      <h1 class="title">Box vs Box</h1>
+      <p class="subtitle">${fmtDate(w.wod_date)} · ${escapeHtml(w.name)} · avg × turnout</p>
+      ${action ? `<div class="action-banner">${action}</div>` : ''}
+      <div id="rows"></div>
+    </div>
+  `);
+  content.appendChild(wrap);
+  const rowsEl = wrap.querySelector('#rows');
+  boxes.forEach((b, i) => {
+    const mine = b.box_id === ownerBox.box_id;
+    rowsEl.appendChild(el(`
+      <div class="box-row ${mine ? 'mine' : ''}">
+        <div class="box-rank">${i + 1}</div>
+        <div class="box-main">
+          <div class="box-name">${escapeHtml(b.name)}${mine ? ' · your box' : ''}</div>
+          <div class="box-breakdown"><b>${b.avg_score}</b> avg × <b>${pct(b.participation)}%</b> turnout · ${b.logged_members}/${b.total_members} logged</div>
+        </div>
+        <div class="box-score">${b.score}</div>
+      </div>`));
+  });
+}
+
+async function renderOwnerThrowdown() {
+  setScreenName('Throwdown');
+  content.innerHTML = '<p class="subtitle">Loading…</p>';
+  let w, challenges, boxesList, workoutsList;
+  try {
+    w = await ensureWorkout();
+    [challenges, boxesList, workoutsList] = await Promise.all([
+      api('GET', `/api/challenges/box/${ownerBox.box_id}`).then((r) => r.challenges),
+      api('GET', '/api/boxes').then((r) => r.boxes),
+      api('GET', '/api/workouts').then((r) => r.workouts),
+    ]);
+  } catch (e) { content.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+
+  const active = challenges.filter((c) => c.status === 'active');
+  const standings = await Promise.all(active.map((c) => api('GET', `/api/challenges/${c.id}/standing`).catch(() => null)));
+
+  content.innerHTML = '';
+  const wrap = el(`
+    <div>
+      <h1 class="title">Throwdowns</h1>
+      <p class="subtitle">Challenge another box — live head-to-head scoring</p>
+      <div id="active"></div>
+      <div class="sec-title">Start a throwdown</div>
+      <div class="card">
+        <label class="field"><span class="lbl">Rival box</span>
+          <select id="rival">${boxesList.filter((b) => b.box_id !== ownerBox.box_id)
+            .map((b) => `<option value="${b.box_id}">${escapeHtml(b.name)}</option>`).join('')}</select></label>
+        <label class="field"><span class="lbl">WOD</span>
+          <select id="wod">${workoutsList.map((x) =>
+            `<option value="${x.workout_id}" ${x.workout_id === w.workout_id ? 'selected' : ''}>${escapeHtml(x.name)} · ${fmtDate(x.wod_date)}</option>`).join('')}</select></label>
+        <div class="range2">
+          <label class="field"><span class="lbl">Starts</span><input type="date" id="starts" value="${ymd(new Date())}" /></label>
+          <label class="field"><span class="lbl">Ends</span><input type="date" id="ends" value="${ymd(new Date(Date.now() + 7 * 86400000))}" /></label>
+        </div>
+        <button class="btn-primary" id="send">Send challenge ⚔</button>
+        <div class="error" id="err"></div>
+      </div>
+    </div>
+  `);
+  content.appendChild(wrap);
+
+  const activeEl = wrap.querySelector('#active');
+  if (!active.length) activeEl.appendChild(el(`<div class="empty">No active throwdowns yet. Start one below.</div>`));
+  standings.filter(Boolean).forEach((s) => activeEl.appendChild(throwdownCard(s)));
+
+  const err = wrap.querySelector('#err');
+  const btn = wrap.querySelector('#send');
+  btn.addEventListener('click', async () => {
+    err.textContent = '';
+    btn.disabled = true; btn.textContent = 'Sending…';
+    try {
+      await api('POST', '/api/challenges', {
+        challengerBoxId: ownerBox.box_id,
+        opponentBoxId: wrap.querySelector('#rival').value,
+        workoutId: wrap.querySelector('#wod').value,
+        startsAt: wrap.querySelector('#starts').value,
+        endsAt: wrap.querySelector('#ends').value,
+      });
+      showToast('Challenge sent ⚔');
+      renderOwnerThrowdown();
+    } catch (e) {
+      err.textContent = e.message; btn.disabled = false; btn.textContent = 'Send challenge ⚔';
+    }
+  });
+}
+
+function throwdownCard(s) {
+  const ch = s.challenge;
+  const mineIsChallenger = ch.challenger_box_id === ownerBox.box_id;
+  const mine = mineIsChallenger ? s.challenger : s.opponent;
+  const them = mineIsChallenger ? s.opponent : s.challenger;
+  const winMine = mine.score >= them.score;
+  const total = (mine.score + them.score) || 1;
+  return el(`
+    <div class="card td-card">
+      <div class="td-head"><b>${escapeHtml(ch.workout_name)}</b> · ${fmtDate(ch.starts_at)} – ${fmtDate(ch.ends_at)}</div>
+      <div class="vs">
+        <div class="side ${winMine ? 'win' : ''}">
+          <div class="tag">YOU</div><div class="sub">${escapeHtml(mine.name)}</div>
+          <div class="s">${mine.score}</div>
+          <div class="brk">${mine.avg_score} avg × ${pct(mine.participation)}%</div>
+        </div>
+        <div class="mid">VS</div>
+        <div class="side ${!winMine ? 'win' : ''}">
+          <div class="tag">RIVAL</div><div class="sub">${escapeHtml(them.name)}</div>
+          <div class="s">${them.score}</div>
+          <div class="brk">${them.avg_score} avg × ${pct(them.participation)}%</div>
+        </div>
+      </div>
+      <div class="vsbar"><span class="a" style="flex:${mine.score + 0.01}"></span><span class="b" style="flex:${them.score + 0.01}"></span></div>
+      <div class="vs-note">${winMine ? 'You\'re ahead' : 'You\'re behind'} — updates live as members log ${escapeHtml(ch.workout_name)}.</div>
+    </div>
+  `);
+}
+
+async function renderOwnerEngage() {
+  setScreenName('Engage');
+  content.innerHTML = '<p class="subtitle">Loading…</p>';
+  let w;
+  try { w = await ensureWorkout(); } catch (e) { content.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+
+  content.innerHTML = '';
+  const wrap = el(`
+    <div>
+      <h1 class="title">Engage your box</h1>
+      <p class="subtitle">Mobilize members in a tap</p>
+      <div class="card">
+        <div class="wod-head"><h2 class="wod-name">${escapeHtml(w.name)}</h2>${w.type ? `<span class="type-badge">${escapeHtml(w.type)}</span>` : ''}</div>
+        <div class="wod-date">${fmtDate(w.wod_date)}</div>
+        <p class="wod-desc">${escapeHtml(w.description)}</p>
+      </div>
+      <button class="btn-primary" id="postWod">📣 Post today's WOD to the box</button>
+      <button class="btn-outline wide" id="rally">💪 Rally members going quiet</button>
+      <p class="subtitle" style="margin-top:14px">These notifications are mocked for the demo — taps confirm visually.</p>
+    </div>
+  `);
+  content.appendChild(wrap);
+  // Engagement sends are MOCK for the demo (no push/email wired up).
+  wrap.querySelector('#postWod').addEventListener('click', () =>
+    showToast(`Posted ${w.name} to ${ownerBox.name} (mock)`));
+  wrap.querySelector('#rally').addEventListener('click', () =>
+    showToast('Rally sent to quiet members 💪 (mock)'));
+}
+
+// ---- bootstrap --------------------------------------------------------------
+async function loadProfile() {
+  try { profile = await api('GET', `/api/profile/${userId}`); }
+  catch (e) { localStorage.removeItem(STORAGE_KEY); userId = null; profile = null; }
+  go();
+}
+
+renderNav();
+updateRoleToggle();
+if (userId) loadProfile(); else go();

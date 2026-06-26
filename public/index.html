@@ -369,6 +369,71 @@
     .post-foot button.liked { color: var(--acid); }
     .post-foot .react:hover { color: var(--chalk); }
 
+    /* Role toggle (header) */
+    .role-toggle { display: inline-flex; background: var(--surface-2); border: 1px solid var(--border); border-radius: 999px; padding: 3px; }
+    .role-toggle button {
+      border: none; background: transparent; color: var(--muted); cursor: pointer;
+      font-size: 0.7rem; font-weight: 700; letter-spacing: 0.03em; padding: 6px 12px; border-radius: 999px;
+    }
+    .role-toggle button.active { background: var(--acid); color: #10130a; }
+
+    /* ── Owner view ───────────────────────────────────────────────────────── */
+    .hero .big { font-size: 3.4rem; font-weight: 800; color: var(--acid); line-height: 1; }
+    .hero .lab { color: var(--muted); font-size: 0.8rem; letter-spacing: 0.04em; margin-top: 4px; }
+    .stat-row { display: flex; gap: 8px; margin-top: 16px; }
+    .mini-stat { flex: 1; background: var(--surface-2); border: 1px solid var(--border); border-radius: 12px; padding: 11px; text-align: center; }
+    .mini-stat .n { font-size: 1.35rem; font-weight: 800; }
+    .mini-stat .l { color: var(--muted); font-size: 0.64rem; letter-spacing: 0.08em; text-transform: uppercase; margin-top: 3px; }
+
+    .rank-card { background: var(--acid-dim); border: 1px solid var(--acid); border-radius: 14px; padding: 16px; margin-bottom: 16px; }
+    .rank-card .rc-top { display: flex; align-items: center; justify-content: space-between; }
+    .rank-card .pos { font-size: 2.1rem; font-weight: 800; }
+    .rank-card .pos .of { color: var(--muted); font-size: 1rem; font-weight: 600; }
+    .rank-card .rc-meta { text-align: right; color: var(--muted); font-size: 0.72rem; letter-spacing: 0.08em; text-transform: uppercase; line-height: 1.3; }
+    .rank-card .rc-gap { margin: 10px 0 14px; font-size: 0.95rem; }
+    .rank-card .rc-gap b { color: var(--acid); }
+
+    .sec-title { font-size: 0.72rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin: 22px 0 9px; }
+    .sec-title.danger-title { color: var(--danger); }
+
+    .list-row { display: flex; align-items: center; justify-content: space-between; gap: 10px;
+      padding: 12px 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); margin-bottom: 8px; }
+    .list-row.warn { border-color: rgba(255, 107, 107, 0.35); }
+    .list-row .lr-main { min-width: 0; }
+    .list-row .nm { font-weight: 700; font-size: 0.95rem; }
+    .list-row .meta { color: var(--muted); font-size: 0.76rem; margin-top: 2px; }
+    .pill-warn { color: var(--danger); font-weight: 800; font-size: 0.82rem; flex: none; }
+    .pill-hot { color: var(--acid); font-weight: 800; font-size: 0.85rem; flex: none; }
+
+    .action-banner { background: var(--acid-dim); border: 1px solid var(--acid); border-radius: 12px;
+      padding: 12px 14px; font-size: 0.9rem; line-height: 1.45; margin-bottom: 14px; }
+    .action-banner b { color: var(--acid); }
+
+    .btn-outline { width: 100%; margin-top: 14px; background: transparent; color: var(--acid);
+      border: 1px solid var(--acid); border-radius: 12px; padding: 12px; font-size: 0.92rem; font-weight: 700; cursor: pointer; }
+    .btn-outline.wide { margin-top: 10px; }
+
+    .range2 { display: flex; gap: 10px; }
+    .range2 .field { flex: 1; }
+    input[type="date"] { width: 100%; background: var(--surface-2); border: 1px solid var(--border);
+      border-radius: 12px; color: var(--chalk); padding: 12px 14px; font-size: 0.95rem; font-family: inherit; }
+
+    /* Throwdown head-to-head */
+    .td-card { padding: 16px; }
+    .td-head { font-size: 0.85rem; color: var(--chalk); margin-bottom: 12px; }
+    .vs { display: flex; align-items: stretch; gap: 8px; }
+    .vs .side { flex: 1; background: var(--surface-2); border: 1px solid var(--border); border-radius: 12px; padding: 12px; text-align: center; }
+    .vs .side.win { border-color: var(--acid); background: var(--acid-dim); }
+    .vs .side .tag { font-size: 0.6rem; letter-spacing: 0.12em; color: var(--muted); }
+    .vs .side .sub { font-weight: 700; font-size: 0.82rem; margin: 3px 0 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .vs .side .s { font-size: 1.8rem; font-weight: 800; color: var(--acid); line-height: 1; }
+    .vs .side .brk { color: var(--muted); font-size: 0.68rem; margin-top: 5px; }
+    .vs .mid { display: flex; align-items: center; color: var(--muted); font-weight: 800; font-size: 0.8rem; }
+    .vsbar { height: 8px; border-radius: 999px; overflow: hidden; display: flex; margin-top: 12px; background: var(--surface-2); }
+    .vsbar .a { background: var(--acid); }
+    .vsbar .b { background: #5a6cff; }
+    .vs-note { color: var(--muted); font-size: 0.74rem; margin-top: 10px; text-align: center; }
+
     .hidden { display: none !important; }
   </style>
 </head>
@@ -376,7 +441,10 @@
   <div class="phone">
     <div class="topbar">
       <div class="brand">Wur<span class="q">Q</span></div>
-      <div class="screen-name">Profile</div>
+      <div class="role-toggle" id="roleToggle">
+        <button type="button" data-role="athlete">Athlete</button>
+        <button type="button" data-role="owner">Owner</button>
+      </div>
     </div>
 
     <div class="content" id="content">

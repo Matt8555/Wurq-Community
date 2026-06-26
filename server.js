@@ -325,10 +325,8 @@ app.get('/api/leaderboard/box/:boxId/:workoutId', wrap(async (req, res) => {
 
 // ---- API: box-vs-box --------------------------------------------------------
 // score = (avg holistic_score of members who logged) × (participation rate).
-app.get('/api/leaderboard/boxes/:workoutId', wrap(async (req, res) => {
-  const { workoutId } = req.params;
-  if (!isUuid(workoutId)) return res.status(400).json({ error: 'Invalid workout id.' });
-
+// Shared by the athlete board, the owner competition screen, and the dashboard.
+async function computeBoxStandings(workoutId) {
   const { rows } = await pool.query(
     `SELECT b.box_id, b.name,
             COUNT(DISTINCT m.user_id)::int AS total_members,
@@ -340,8 +338,7 @@ app.get('/api/leaderboard/boxes/:workoutId', wrap(async (req, res) => {
       GROUP BY b.box_id, b.name`,
     [workoutId]
   );
-
-  const boxes = rows.map((b) => {
+  return rows.map((b) => {
     const avg = b.avg_score == null ? 0 : Number(b.avg_score);
     const participation = b.total_members > 0 ? b.logged_members / b.total_members : 0;
     return {
@@ -354,8 +351,31 @@ app.get('/api/leaderboard/boxes/:workoutId', wrap(async (req, res) => {
       score: Math.round(avg * participation * 10) / 10,
     };
   }).sort((a, b) => b.score - a.score);
+}
 
-  res.json({ boxes });
+app.get('/api/leaderboard/boxes/:workoutId', wrap(async (req, res) => {
+  const { workoutId } = req.params;
+  if (!isUuid(workoutId)) return res.status(400).json({ error: 'Invalid workout id.' });
+  res.json({ boxes: await computeBoxStandings(workoutId) });
+}));
+
+// ---- API: list workouts + boxes (pickers) -----------------------------------
+app.get('/api/workouts', wrap(async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT workout_id, name, type, description, wod_date
+       FROM workouts ORDER BY wod_date DESC, name LIMIT 50`);
+  res.json({ workouts: rows });
+}));
+
+app.get('/api/boxes', wrap(async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT b.box_id, b.name, b.location,
+            COUNT(m.user_id)::int AS member_count
+       FROM boxes b
+       LEFT JOIN box_memberships m ON m.box_id = b.box_id
+      GROUP BY b.box_id, b.name, b.location
+      ORDER BY b.name`);
+  res.json({ boxes: rows });
 }));
 
 // ---- API: box feed ----------------------------------------------------------
@@ -391,6 +411,186 @@ app.post('/api/feed/:eventId/kudos', wrap(async (req, res) => {
   );
   if (!rows[0]) return res.status(404).json({ error: 'Event not found.' });
   res.json(rows[0]);
+}));
+
+// ---- API: owner dashboard ---------------------------------------------------
+// Everything an owner needs at a glance for one box: participation, box-vs-box
+// rank + rival gap, churn-risk (quiet 10+ days), and hot streaks this week.
+app.get('/api/owner/box/:boxId/dashboard', wrap(async (req, res) => {
+  const { boxId } = req.params;
+  if (!isUuid(boxId)) return res.status(400).json({ error: 'Invalid box id.' });
+
+  const box = await pool.query('SELECT box_id, name, location FROM boxes WHERE box_id = $1', [boxId]);
+  if (!box.rows[0]) return res.status(404).json({ error: 'Box not found.' });
+
+  // Today's WOD (the active box-vs-box competition).
+  await pool.query(
+    `INSERT INTO workouts (name, type, description, wod_date)
+       SELECT 'Fran', 'For Time', '21-15-9 reps for time: Thrusters (95/65 lb) and Pull-ups.', CURRENT_DATE
+       WHERE NOT EXISTS (SELECT 1 FROM workouts WHERE name = 'Fran' AND wod_date = CURRENT_DATE)`);
+  const wodRow = await pool.query(
+    `SELECT workout_id, name FROM workouts ORDER BY (wod_date = CURRENT_DATE) DESC, wod_date DESC LIMIT 1`);
+  const wod = wodRow.rows[0];
+
+  const [participation, churn, streaks] = await Promise.all([
+    pool.query(
+      `SELECT (SELECT COUNT(*)::int FROM box_memberships WHERE box_id = $1) AS total_members,
+              COUNT(DISTINCT r.user_id) FILTER (WHERE r.created_at::date = CURRENT_DATE)::int AS trained_today,
+              COUNT(DISTINCT r.user_id) FILTER (WHERE r.created_at >= now() - interval '7 days')::int AS trained_week
+         FROM box_memberships m
+         LEFT JOIN results r ON r.user_id = m.user_id
+        WHERE m.box_id = $1`, [boxId]),
+    pool.query(
+      `SELECT m.user_id,
+              COALESCE(NULLIF(p.display_name, ''), 'Athlete') AS display_name,
+              (CURRENT_DATE - MAX(r.created_at)::date) AS days_since
+         FROM box_memberships m
+         LEFT JOIN profiles p ON p.user_id = m.user_id
+         LEFT JOIN results r ON r.user_id = m.user_id
+        WHERE m.box_id = $1
+        GROUP BY m.user_id, p.display_name
+       HAVING MAX(r.created_at) IS NULL OR MAX(r.created_at) < now() - interval '10 days'
+        ORDER BY days_since DESC NULLS FIRST
+        LIMIT 8`, [boxId]),
+    pool.query(
+      `SELECT m.user_id,
+              COALESCE(NULLIF(p.display_name, ''), 'Athlete') AS display_name,
+              COUNT(DISTINCT r.created_at::date)::int AS days_this_week
+         FROM box_memberships m
+         LEFT JOIN profiles p ON p.user_id = m.user_id
+         JOIN results r ON r.user_id = m.user_id AND r.created_at >= now() - interval '7 days'
+        WHERE m.box_id = $1
+        GROUP BY m.user_id, p.display_name
+       HAVING COUNT(DISTINCT r.created_at::date) >= 2
+        ORDER BY days_this_week DESC, display_name
+        LIMIT 6`, [boxId]),
+  ]);
+
+  // Box-vs-box rank + gap to the box directly ahead.
+  const standings = await computeBoxStandings(wod.workout_id);
+  const pos = standings.findIndex((b) => b.box_id === boxId);
+  const me = pos >= 0 ? standings[pos] : null;
+  const ahead = pos > 0 ? standings[pos - 1] : null;
+  const rank = me ? {
+    position: pos + 1,
+    total_boxes: standings.length,
+    score: me.score,
+    workout_name: wod.name,
+    ahead: ahead ? { name: ahead.name, score: ahead.score, gap: Math.round((ahead.score - me.score) * 10) / 10 } : null,
+  } : null;
+
+  res.json({
+    box: box.rows[0],
+    participation: participation.rows[0],
+    rank,
+    churn: churn.rows.map((c) => ({ ...c, days_since: c.days_since == null ? null : Number(c.days_since) })),
+    streaks: streaks.rows,
+  });
+}));
+
+// ---- API: challenges --------------------------------------------------------
+app.post('/api/challenges', wrap(async (req, res) => {
+  const b = req.body || {};
+  const challenger = b.challengerBoxId || b.challenger_box_id;
+  const opponent = b.opponentBoxId || b.opponent_box_id;
+  const workoutId = b.workoutId || b.workout_id;
+  if (!isUuid(challenger)) return res.status(400).json({ error: 'A valid challengerBoxId is required.' });
+  if (!isUuid(opponent)) return res.status(400).json({ error: 'A valid opponentBoxId is required.' });
+  if (challenger === opponent) return res.status(400).json({ error: 'A box cannot challenge itself.' });
+  if (!isUuid(workoutId)) return res.status(400).json({ error: 'A valid workoutId is required.' });
+
+  const startsAt = b.startsAt || b.starts_at;
+  const endsAt = b.endsAt || b.ends_at;
+  const start = startsAt ? new Date(startsAt) : new Date();
+  const end = endsAt ? new Date(endsAt) : new Date(Date.now() + 7 * 86400000);
+  if (isNaN(start) || isNaN(end)) return res.status(400).json({ error: 'Invalid start/end date.' });
+  if (end <= start) return res.status(400).json({ error: 'ends_at must be after starts_at.' });
+
+  const check = await pool.query(
+    `SELECT
+       (SELECT 1 FROM boxes WHERE box_id = $1) AS c,
+       (SELECT 1 FROM boxes WHERE box_id = $2) AS o,
+       (SELECT 1 FROM workouts WHERE workout_id = $3) AS w`,
+    [challenger, opponent, workoutId]);
+  if (!check.rows[0].c || !check.rows[0].o) return res.status(404).json({ error: 'Box not found.' });
+  if (!check.rows[0].w) return res.status(404).json({ error: 'Workout not found.' });
+
+  const { rows } = await pool.query(
+    `INSERT INTO challenges (challenger_box_id, opponent_box_id, workout_id, starts_at, ends_at, status)
+       VALUES ($1, $2, $3, $4, $5, 'active')
+       RETURNING id, challenger_box_id, opponent_box_id, workout_id, starts_at, ends_at, status, created_at`,
+    [challenger, opponent, workoutId, start.toISOString(), end.toISOString()]);
+  res.status(201).json(rows[0]);
+}));
+
+app.get('/api/challenges/box/:boxId', wrap(async (req, res) => {
+  const { boxId } = req.params;
+  if (!isUuid(boxId)) return res.status(400).json({ error: 'Invalid box id.' });
+  const { rows } = await pool.query(
+    `SELECT c.id, c.challenger_box_id, c.opponent_box_id, c.workout_id,
+            c.starts_at, c.ends_at, c.status, c.created_at,
+            cb.name AS challenger_name, ob.name AS opponent_name, w.name AS workout_name
+       FROM challenges c
+       JOIN boxes cb ON cb.box_id = c.challenger_box_id
+       JOIN boxes ob ON ob.box_id = c.opponent_box_id
+       JOIN workouts w ON w.workout_id = c.workout_id
+      WHERE c.challenger_box_id = $1 OR c.opponent_box_id = $1
+      ORDER BY c.created_at DESC`, [boxId]);
+  res.json({ challenges: rows });
+}));
+
+// Head-to-head: each box's avg score × participation for the challenge WOD,
+// restricted to results logged within the challenge window.
+app.get('/api/challenges/:id/standing', wrap(async (req, res) => {
+  const { id } = req.params;
+  if (!isUuid(id)) return res.status(400).json({ error: 'Invalid challenge id.' });
+
+  const c = await pool.query(
+    `SELECT c.*, cb.name AS challenger_name, ob.name AS opponent_name, w.name AS workout_name
+       FROM challenges c
+       JOIN boxes cb ON cb.box_id = c.challenger_box_id
+       JOIN boxes ob ON ob.box_id = c.opponent_box_id
+       JOIN workouts w ON w.workout_id = c.workout_id
+      WHERE c.id = $1`, [id]);
+  if (!c.rows[0]) return res.status(404).json({ error: 'Challenge not found.' });
+  const ch = c.rows[0];
+
+  async function sideStanding(boxId) {
+    const { rows } = await pool.query(
+      `SELECT (SELECT COUNT(*)::int FROM box_memberships WHERE box_id = $1) AS total_members,
+              COUNT(DISTINCT r.user_id)::int AS logged_members,
+              AVG(r.holistic_score) AS avg_score
+         FROM box_memberships m
+         LEFT JOIN results r ON r.user_id = m.user_id
+              AND r.workout_id = $2
+              AND r.created_at BETWEEN $3 AND $4
+        WHERE m.box_id = $1`,
+      [boxId, ch.workout_id, ch.starts_at, ch.ends_at]);
+    const row = rows[0];
+    const avg = row.avg_score == null ? 0 : Number(row.avg_score);
+    const participation = row.total_members > 0 ? row.logged_members / row.total_members : 0;
+    return {
+      total_members: row.total_members,
+      logged_members: row.logged_members,
+      avg_score: Math.round(avg * 10) / 10,
+      participation: Math.round(participation * 100) / 100,
+      score: Math.round(avg * participation * 10) / 10,
+    };
+  }
+
+  const [challenger, opponent] = await Promise.all([
+    sideStanding(ch.challenger_box_id), sideStanding(ch.opponent_box_id)]);
+
+  res.json({
+    challenge: {
+      id: ch.id, status: ch.status, starts_at: ch.starts_at, ends_at: ch.ends_at,
+      workout_name: ch.workout_name,
+      challenger_box_id: ch.challenger_box_id, challenger_name: ch.challenger_name,
+      opponent_box_id: ch.opponent_box_id, opponent_name: ch.opponent_name,
+    },
+    challenger: { box_id: ch.challenger_box_id, name: ch.challenger_name, ...challenger },
+    opponent: { box_id: ch.opponent_box_id, name: ch.opponent_name, ...opponent },
+  });
 }));
 
 // ---- Static + SPA -----------------------------------------------------------

@@ -12,7 +12,7 @@ Postgres.
 
 `user_id` (UUID) is the real, immutable key; `email` is the human match key.
 Tables: `users`, `profiles`, `identities`, `boxes`, `box_memberships`,
-`workouts`, `results`, `badges`, `user_badges`, `feed_events`. The `identities`
+`workouts`, `results`, `badges`, `user_badges`, `feed_events`, `challenges`. The `identities`
 table lets you link other identity sources later (Shopify, Circle, watch, …)
 **without restructuring** — each source just adds a row keyed by `user_id`.
 
@@ -47,6 +47,23 @@ one file so they are easy to tune.
 | GET | `/api/leaderboard/boxes/:workoutId` | Box-vs-box: each box scored by **avg Holistic Score × participation rate**, with the component numbers. |
 | GET | `/api/feed/box/:boxId` | Recent feed events for a box's members, newest first. |
 | POST | `/api/feed/:eventId/kudos` | Increment the kudos count on a feed event. |
+| GET | `/api/boxes` | List boxes (id, name, location, member count). |
+| GET | `/api/workouts` | List workouts (for the challenge WOD picker). |
+| GET | `/api/owner/box/:boxId/dashboard` | Owner dashboard: participation, box-vs-box rank + rival gap, churn-risk members (quiet 10+ days), hot streaks. |
+| POST | `/api/challenges` | Create a throwdown (`challengerBoxId`, `opponentBoxId`, `workoutId`, `startsAt`, `endsAt`). |
+| GET | `/api/challenges/box/:boxId` | List a box's challenges (as challenger or opponent). |
+| GET | `/api/challenges/:id/standing` | Head-to-head: each box's avg score × participation for the challenge WOD, within the window. |
+
+## Owner view
+
+A header toggle switches between **Athlete view** (unchanged) and **Owner
+view** (persisted in `localStorage`). The owner view has its own bottom nav and
+screens: a **Dashboard** (today/this-week participation as the hero, box-vs-box
+rank with the rival gap, a prominent "members going quiet" churn list, and hot
+streaks), a **Compete** screen (live box-vs-box with an actionable "log N more
+to pass X" prompt), **Throwdown** (create a challenge and watch live head-to-head
+scoring), and **Engage** (post-WOD / rally — mocked sends). For the demo the
+owner owns **CrossFit Borderland** (resolved by name from `/api/boxes`).
 
 **Profile photos persist in Postgres.** Uploaded avatars are stored as base64
 data URIs in `profiles.avatar_url` (capped at 2 MB), not on the local
@@ -82,17 +99,25 @@ profile, save, and reload — it persists.
 
 ## Demo seed data
 
-To make every screen look alive, run the idempotent seed script. It creates 4
-boxes, ~30 members (20 with logged Fran results), varied box-vs-box standings,
-and a populated feed. Re-running it does **not** duplicate anything.
+To make every screen look alive, run the idempotent seed script. Re-running it
+does **not** duplicate anything.
 
 ```bash
 DATABASE_URL="postgres://…" npm run seed
 ```
 
-Then set your profile's gym/box to **CrossFit Pegacorn** (the demo home box) to
-drop into the already-populated box. The Community/Circle tab's posts are a
-front-end mock and always render, so they aren't part of the seed.
+It seeds:
+
+- **Athlete side:** 4 boxes incl. the home box **CrossFit Pegacorn**, ~30
+  members (with logged Fran results), varied box-vs-box standings, and a feed.
+  Set your profile's gym to *CrossFit Pegacorn* to drop into the populated box.
+- **Owner side:** the owner's box **CrossFit Borderland** with members, historic
+  results (driving streaks + churn-risk recency), rival boxes (incl. *CF South
+  Texas*, *Iron Valley*), and one active throwdown so the owner screens look
+  live. Switch to **Owner view** with the header toggle.
+
+The Community/Circle tab's posts are a front-end mock and always render, so they
+aren't part of the seed.
 
 ## Branding
 

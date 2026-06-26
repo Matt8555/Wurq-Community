@@ -126,6 +126,20 @@ const SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_feed_user    ON feed_events(user_id);
   CREATE INDEX IF NOT EXISTS idx_feed_created ON feed_events(created_at DESC);
+
+  -- Box-vs-box throwdown challenges.
+  CREATE TABLE IF NOT EXISTS challenges (
+    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    challenger_box_id UUID NOT NULL REFERENCES boxes(box_id) ON DELETE CASCADE,
+    opponent_box_id   UUID NOT NULL REFERENCES boxes(box_id) ON DELETE CASCADE,
+    workout_id        UUID NOT NULL REFERENCES workouts(workout_id) ON DELETE CASCADE,
+    starts_at         TIMESTAMPTZ NOT NULL,
+    ends_at           TIMESTAMPTZ NOT NULL,
+    status            TEXT NOT NULL DEFAULT 'active',
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS idx_challenges_challenger ON challenges(challenger_box_id);
+  CREATE INDEX IF NOT EXISTS idx_challenges_opponent   ON challenges(opponent_box_id);
 `;
 
 // Idempotent fixups for databases created by earlier versions of this app:
