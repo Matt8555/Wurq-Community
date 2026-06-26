@@ -7,7 +7,7 @@ const { pool, migrate } = require('./db');
 const { computeHolisticScore, computeBreakdown } = require('./holisticScore');
 const { evaluateBadges } = require('./badges');
 const { deriveMetrics } = require('./metrics');
-const { runSeed, ensureDemoAthlete, DEMO_EMAIL } = require('./seed');
+const { runSeed, ensureDemoAthletes } = require('./seed');
 
 const BENCHMARKS = ['Fran', 'Helen', 'Grace', 'Cindy', 'Diane', 'Annie', 'Karen', 'Jackie', 'Isabel', 'Amanda', 'Elizabeth', 'Randy', 'Nancy'];
 const SEED_SENTINEL_BOX = 'CrossFit Borderland'; // presence = seeded world exists
@@ -855,8 +855,8 @@ async function maybeSeed() {
     catch (e) { console.error('[startup] seed failed (continuing):', e.message); }
     finally { seeding = false; }
   } else {
-    // World already present — just keep the demo login's personal history fresh.
-    try { await ensureDemoAthlete(DEMO_EMAIL); } catch (e) { console.error('[startup] demo backfill failed:', e.message); }
+    // World already present — just keep the demo logins' personal history fresh.
+    try { await ensureDemoAthletes(); } catch (e) { console.error('[startup] demo backfill failed:', e.message); }
   }
 }
 

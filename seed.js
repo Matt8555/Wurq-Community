@@ -26,9 +26,18 @@ const { pool, migrate } = require('./db');
 const { computeHolisticScore } = require('./holisticScore');
 const { deriveMetrics } = require('./metrics');
 
-// The demo login that gets a full personal month backfilled. Override per deploy
-// with the DEMO_EMAIL env var if you sign in with a different email.
-const DEMO_EMAIL = process.env.DEMO_EMAIL || 'matt@pegacorngroup.com';
+// Demo logins that each get a full personal month backfilled, in the same box so
+// you can compare them side by side. Override emails per deploy with DEMO_EMAILS
+// (comma-separated, by position) or DEMO_EMAIL (just the first).
+const DEFAULT_DEMO = [
+  { email: 'matt@pegacorngroup.com', name: 'Matt P',      exp: 'intermediate', ability: 0.55, prob: 0.50, streak: 7 },
+  { email: 'alex@pegacorngroup.com', name: 'Alex Rivera', exp: 'RX',           ability: 0.79, prob: 0.66, streak: 12 },
+];
+const DEMO_ATHLETES = (() => {
+  const overrides = (process.env.DEMO_EMAILS || process.env.DEMO_EMAIL || '')
+    .split(',').map((s) => s.trim()).filter(Boolean);
+  return DEFAULT_DEMO.map((p, i) => (overrides[i] ? { ...p, email: overrides[i] } : p));
+})();
 
 const SEED = 20260601;            // fixed base seed -> reproducible world
 const DAYS = 28;                  // days of activity ending today (k=0 = today)
@@ -167,29 +176,28 @@ function generateWorld() {
     }
     bIndex++;
   }
-  athletes.push(buildDemoAthlete());
+  DEMO_ATHLETES.forEach((p, i) => athletes.push(buildDemoAthlete(p, i)));
   return athletes;
 }
 
-// The demo user: a realistic AVERAGE athlete at the home box. Trains ~4x/week
-// with a current streak (k=0..6 incl. today), mid-pack ability, a few personal
-// bests and slight improvement over the month — a believable everyday athlete.
-function buildDemoAthlete(email = DEMO_EMAIL) {
-  const rng = mulberry32(SEED + 424242);
-  const ability = 0.55; // genuinely mid-pack — an everyday athlete
+// A demo athlete (persona) at the home box: trains to their `prob`/`streak`,
+// ability sets their scores, slight improvement over the month. Distinct RNG
+// per index so the two demo logins have different histories.
+function buildDemoAthlete(p, idx = 0) {
+  const rng = mulberry32(SEED + 424242 + idx * 9973);
   const results = [];
   let firstK = -1, franBestK = -1;
   for (let k = DAYS - 1; k >= 0; k--) {
     const prog = (DAYS - 1 - k) / (DAYS - 1);
-    const train = k <= 6 ? true : rng() < 0.5; // ~4x/week + a 7-day current streak
+    const train = k <= p.streak ? true : rng() < p.prob;
     if (!train) continue;
-    const eff = clamp(ability + 0.08 * prog + (rng() * 2 - 1) * 0.06, 0.3, 0.9);
+    const eff = clamp(p.ability + 0.08 * prog + (rng() * 2 - 1) * 0.06, 0.3, 0.95);
     const r = genResult(k, eff, rng);
     results.push(r);
     if (firstK < 0 || k > firstK) firstK = k;
     if (FRAN_DAYS.has(k) && r.time < 240 && (franBestK < 0 || k > franBestK)) franBestK = k;
   }
-  return { email, name: 'Matt P', exp: 'intermediate', boxName: HOME_BOX, results, firstK, franBestK };
+  return { email: p.email, name: p.name, exp: p.exp, boxName: HOME_BOX, results, firstK, franBestK };
 }
 
 // Helpers to turn a day-offset k into a date string / timestamp anchored to today.
@@ -213,7 +221,11 @@ const resultRow = (uid, wid, r, tsStr) => [uid, wid, r.time, r.rom, r.sets, r.ho
 // Backfill (or refresh) just the demo athlete's month into the existing seeded
 // world — idempotent and NON-destructive (touches only this account). Lets a
 // deploy give the demo login a full personal history without rebuilding the world.
-async function ensureDemoAthlete(email = DEMO_EMAIL) {
+async function ensureDemoAthletes() {
+  for (let i = 0; i < DEMO_ATHLETES.length; i++) await ensureDemoAthlete(DEMO_ATHLETES[i], i);
+}
+
+async function ensureDemoAthlete(p, idx = 0) {
   const anchor = (await pool.query(`SELECT to_char(CURRENT_DATE, 'YYYY-MM-DD') AS d`)).rows[0].d;
   const { dayStr, ts } = dateHelpers(anchor);
   const client = await pool.connect();
@@ -229,7 +241,8 @@ async function ensureDemoAthlete(email = DEMO_EMAIL) {
     const widByDate = {};
     wRows.forEach((w) => { widByDate[w.d] = w.workout_id; });
 
-    const a = buildDemoAthlete(email);
+    const a = buildDemoAthlete(p, idx);
+    const email = p.email;
     const uid = await upsertUser(client, email);
     await upsertProfile(client, uid, { display_name: a.name, gym_name: HOME_BOX, exp: a.exp });
     await joinBox(client, uid, boxId);
@@ -481,13 +494,13 @@ async function main() {
   const c = t.rows[0];
   console.log(`[seed] world rebuilt — ${c.boxes} boxes, ${c.athletes} athletes, ${c.results} results, ` +
     `${c.workouts} workouts, ${c.challenges} challenges, ${c.feed} feed events, ${c.badges} badge awards.`);
-  console.log(`[seed] Demo box: "${HOME_BOX}". Demo login: "${DEMO_EMAIL}" (average athlete, full month).`);
+  console.log(`[seed] Demo box: "${HOME_BOX}". Demo logins: ${DEMO_ATHLETES.map((p) => `${p.email} (${p.name})`).join(', ')}.`);
 }
 
 // Exported so the server can auto-seed an empty database on startup, or backfill
 // just the demo athlete on later boots. (main() shares the ./db pool and does NOT
 // close it.) Run directly to seed manually.
-module.exports = { runSeed: main, ensureDemoAthlete, DEMO_EMAIL };
+module.exports = { runSeed: main, ensureDemoAthletes, DEMO_ATHLETES };
 
 if (require.main === module) {
   main()

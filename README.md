@@ -50,9 +50,17 @@ real queries over the seeded month:
 - **Benchmark tracking** — per repeated benchmark (Fran, Helen, …), the history
   over time with a sparkline.
 
-Log in as **matt@pegacorngroup.com** (the seeded hero) to see a rich month, a
-27-day streak, several PRs, and top-of-box standing. Their today's Fran is left
-unlogged on purpose — log a fast time to trigger the PR celebration live.
+Two demo logins are backfilled with a full personal month in CrossFit Borderland
+so you can compare athletes side by side:
+
+- **matt@pegacorngroup.com** — *Matt P*, an average intermediate athlete (mid-pack
+  scores, ~top 55% in box).
+- **alex@pegacorngroup.com** — *Alex Rivera*, a strong RX athlete (top-of-box,
+  beats ~95% of peers).
+
+Log in as either (Profile → "Not you? Start over"). These accounts are refreshed
+on every deploy without rebuilding the world. Override the emails with the
+`DEMO_EMAILS` env var (comma-separated, by position) or `DEMO_EMAIL` (first only).
 
 ## Holistic Score
 
