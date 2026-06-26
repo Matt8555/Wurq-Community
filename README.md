@@ -11,10 +11,19 @@ Postgres.
 ## Data model
 
 `user_id` (UUID) is the real, immutable key; `email` is the human match key.
-Tables: `users`, `profiles`, `identities`, `workouts`, and `results`. The
-`identities` table lets you link other identity sources later (Shopify, Circle,
-watch, …) **without restructuring** — each source just adds a row keyed by
-`user_id`. A "Fran" workout is seeded for the current day on startup.
+Tables: `users`, `profiles`, `identities`, `boxes`, `box_memberships`,
+`workouts`, `results`, `badges`, `user_badges`, `feed_events`. The `identities`
+table lets you link other identity sources later (Shopify, Circle, watch, …)
+**without restructuring** — each source just adds a row keyed by `user_id`.
+
+**Boxes are the canonical gym entity.** `profiles.gym_name` is kept as a display
+field, but on startup any `gym_name` without a matching box gets a `boxes` row +
+`box_memberships` row created automatically, and saving a profile keeps the box
+in sync. A "Fran" workout is seeded for the current day on startup (and lazily
+by `GET /api/wod/today`).
+
+Badges are seeded (`first_log`, `sub_4_fran`, `century`) with their rules in the
+`badges.criteria` JSONB column and evaluated after every result.
 
 ## Holistic Score
 
@@ -32,15 +41,22 @@ one file so they are easy to tune.
 | GET | `/api/profile/:userId` | Fetch a profile. |
 | PUT | `/api/profile/:userId` | Create/update profile fields. |
 | POST | `/api/profile/:userId/avatar` | Upload an avatar image (`avatar` field); returns its URL. |
-| GET | `/api/workouts/today` | Today's WOD (falls back to most recent). |
-| GET | `/api/workouts` | List all workouts. |
-| POST | `/api/results` | Submit a result; server computes the Holistic Score and upserts (one row per athlete per workout). |
-| GET | `/api/leaderboard/:workoutId` | Results joined to `display_name` + `gym_name`, ranked by Holistic Score. |
+| GET | `/api/wod/today` | Today's WOD (seeds "Fran" if none exists for today). |
+| POST | `/api/results` | Submit raw inputs (`userId`, `workoutId`, `time_seconds`, `rom_pct`, `unbroken_sets`); server computes the Holistic Score, upserts, writes a `result_logged` feed event, evaluates badges. Returns the saved result + any newly earned badges. |
+| GET | `/api/leaderboard/box/:boxId/:workoutId` | In-box leaderboard, joined to `display_name` + `avatar_url`, ranked by Holistic Score. |
+| GET | `/api/leaderboard/boxes/:workoutId` | Box-vs-box: each box scored by **avg Holistic Score × participation rate**, with the component numbers. |
+| GET | `/api/feed/box/:boxId` | Recent feed events for a box's members, newest first. |
+| POST | `/api/feed/:eventId/kudos` | Increment the kudos count on a feed event. |
 
-Avatars are saved to a local `uploads/` folder and served statically. **For
-production, move avatar storage to object storage (S3) or a mounted Railway
-volume** — the container filesystem is ephemeral and uploads won't survive a
-redeploy.
+Avatars are saved to a local `uploads/` folder and served statically.
+**⚠️ Profile photo storage still needs a persistent volume (separate task):**
+on Railway the container filesystem is ephemeral, so uploaded avatars won't
+survive a redeploy until storage is moved to a mounted Railway volume or object
+storage (S3).
+
+**Auth is intentionally out of scope for now** — the app runs open/no-login.
+Anyone with a `user_id` (cached in the browser) can act as that athlete. Real
+login (and using this as the SSO identity provider) is a later roadmap step.
 
 ## Local development
 

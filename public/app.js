@@ -1,9 +1,9 @@
 'use strict';
 
-// Wurq Community — Profile, WOD log, and live leaderboard.
-// The user_id is the real key (cached in localStorage); email creates/matches it.
+// Wurq Community — Profile, WOD log, live box leaderboards, box-vs-box, and feed.
+// user_id is the real key (cached in localStorage); email creates/matches it.
 // The Holistic Score is computed SERVER-SIDE — the browser only submits raw
-// inputs and renders whatever the API returns.
+// inputs and renders whatever the API returns. No faked/seed data on the client.
 
 const STORAGE_KEY = 'wurq_user_id';
 const EXPERIENCE_LEVELS = ['beginner', 'intermediate', 'RX', 'competitor'];
@@ -15,9 +15,9 @@ const navEl = document.querySelector('.nav');
 
 let userId = localStorage.getItem(STORAGE_KEY);
 let profile = null;
-let currentView = 'profile';     // 'profile' | 'log' | 'leaderboard'
+let currentView = 'profile';     // 'profile' | 'log' | 'leaderboard' | 'feed'
 let todayWorkout = null;
-let lbFilter = 'box';            // 'box' | 'all'
+let lbTab = 'box';               // 'box' | 'boxes'
 let pendingAvatarUrl = null;
 
 // ---- helpers ----------------------------------------------------------------
@@ -50,9 +50,7 @@ function initials(name) {
   if (!name) return '?';
   return name.trim().split(/\s+/).slice(0, 2).map((w) => w[0].toUpperCase()).join('');
 }
-function labelFor(lvl) {
-  return lvl === 'RX' ? 'RX' : lvl.charAt(0).toUpperCase() + lvl.slice(1);
-}
+function labelFor(lvl) { return lvl === 'RX' ? 'RX' : lvl.charAt(0).toUpperCase() + lvl.slice(1); }
 function escapeHtml(v) {
   return (v == null ? '' : String(v)).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
@@ -62,7 +60,6 @@ function fmtTime(seconds) {
   const s = Math.max(0, Math.round(Number(seconds) || 0));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
-// Accepts "mm:ss" or a plain number of seconds. Returns integer seconds or NaN.
 function parseTime(str) {
   const v = String(str).trim();
   if (!v) return NaN;
@@ -80,16 +77,26 @@ function fmtDate(d) {
   if (!y) return '';
   return new Date(y, m - 1, day).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
 }
+function timeAgo(iso) {
+  const then = new Date(iso).getTime();
+  const s = Math.max(0, Math.round((Date.now() - then) / 1000));
+  if (s < 60) return 'just now';
+  const m = Math.floor(s / 60); if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60); if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+function avatarHtml(url, name, cls) {
+  return url
+    ? `<div class="${cls}"><img src="${escapeAttr(url)}" alt="" style="width:100%;height:100%;object-fit:cover" /></div>`
+    : `<div class="${cls}">${escapeHtml(initials(name))}</div>`;
+}
+function num(v) { return Number(v); }
 
 // ---- routing ----------------------------------------------------------------
 function setScreenName(name) { screenNameEl.textContent = name; }
 
 function setView(view) {
-  // Log + Leaderboard require an athlete; bounce to profile setup otherwise.
-  if ((view === 'log' || view === 'leaderboard') && !userId) {
-    showToast('Set up your profile first');
-    view = 'profile';
-  }
+  if (view !== 'profile' && !userId) { showToast('Set up your profile first'); view = 'profile'; }
   currentView = view;
   navEl.querySelectorAll('a[data-view]').forEach((a) =>
     a.classList.toggle('active', a.dataset.view === view));
@@ -100,6 +107,7 @@ function render() {
   if (currentView === 'profile') return renderProfile();
   if (currentView === 'log') return renderLog();
   if (currentView === 'leaderboard') return renderLeaderboard();
+  if (currentView === 'feed') return renderFeed();
 }
 
 navEl.addEventListener('click', (e) => {
@@ -108,6 +116,18 @@ navEl.addEventListener('click', (e) => {
   e.preventDefault();
   setView(a.dataset.view);
 });
+
+// Prompt shown when a box-scoped screen needs a gym that isn't set yet.
+function needBoxPrompt(msg) {
+  content.innerHTML = '';
+  content.appendChild(el(`
+    <div>
+      <div class="empty">${msg}</div>
+      <button class="btn-primary" id="goProfile">Set your gym / box</button>
+    </div>
+  `));
+  content.querySelector('#goProfile').addEventListener('click', () => setView('profile'));
+}
 
 // ---- profile ----------------------------------------------------------------
 function renderProfile() {
@@ -131,11 +151,9 @@ function renderEmailGate() {
       </div>
     </div>
   `));
-
   const emailInput = content.querySelector('#email');
   const btn = content.querySelector('#continue');
   const err = content.querySelector('#err');
-
   async function submit() {
     err.textContent = '';
     const email = emailInput.value.trim();
@@ -280,16 +298,17 @@ function renderProfileForm() {
 }
 
 // ---- WOD log ----------------------------------------------------------------
+async function ensureWorkout() {
+  if (!todayWorkout) todayWorkout = await api('GET', '/api/wod/today');
+  return todayWorkout;
+}
+
 async function renderLog() {
   setScreenName("Today's WOD");
   content.innerHTML = '<p class="subtitle">Loading…</p>';
-  try {
-    if (!todayWorkout) todayWorkout = await api('GET', '/api/workouts/today');
-  } catch (e) {
-    content.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`;
-    return;
-  }
-  const w = todayWorkout;
+  let w;
+  try { w = await ensureWorkout(); }
+  catch (e) { content.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
 
   content.innerHTML = '';
   content.appendChild(el(`
@@ -344,11 +363,12 @@ async function renderLog() {
     }
     btn.disabled = true; btn.textContent = 'Logging…';
     try {
-      const saved = await api('POST', '/api/results', {
-        user_id: userId, workout_id: w.id, time_seconds, rom_pct, unbroken_sets,
+      // Server computes the score; we only send raw inputs.
+      const resp = await api('POST', '/api/results', {
+        userId, workoutId: w.workout_id, time_seconds, rom_pct, unbroken_sets,
       });
       showToast('Logged ✓');
-      renderLogged(saved, w);
+      renderLogged(resp.result, w, resp.newBadges || []);
     } catch (e) {
       err.textContent = e.message;
       btn.disabled = false; btn.textContent = 'Log result';
@@ -356,98 +376,199 @@ async function renderLog() {
   });
 }
 
-function renderLogged(saved, w) {
+function countUp(node, target) {
+  const dur = 600, start = performance.now();
+  function step(t) {
+    const p = Math.min(1, (t - start) / dur);
+    node.textContent = (target * p).toFixed(1).replace(/\.0$/, '');
+    if (p < 1) requestAnimationFrame(step); else node.textContent = String(target);
+  }
+  requestAnimationFrame(step);
+}
+
+function renderLogged(saved, w, newBadges) {
+  const score = Number(saved.holistic_score);
   content.innerHTML = '';
   content.appendChild(el(`
     <div>
       <h1 class="title">Nice work!</h1>
       <p class="subtitle">${escapeHtml(w.name)} · ${fmtTime(saved.time_seconds)} · ${Math.round(saved.rom_pct)}% ROM</p>
       <div class="card score-reveal">
-        <div class="num">${Number(saved.holistic_score)}</div>
+        <div class="num" id="scoreNum">0</div>
         <div class="cap">Holistic Score</div>
       </div>
+      ${newBadges.map((b) => `
+        <div class="badge-unlock">
+          <div class="bu-title">🏅 Badge unlocked</div>
+          <div class="bu-name">${escapeHtml(b.name)}</div>
+          <div class="bu-desc">${escapeHtml(b.description || '')}</div>
+        </div>`).join('')}
       <button class="btn-primary" id="toLb">View leaderboard</button>
       <div class="center" style="margin-top:14px"><button class="link" id="again">Edit my result</button></div>
     </div>
   `));
-  content.querySelector('#toLb').addEventListener('click', () => setView('leaderboard'));
+  countUp(content.querySelector('#scoreNum'), score);
+  content.querySelector('#toLb').addEventListener('click', () => { lbTab = 'box'; setView('leaderboard'); });
   content.querySelector('#again').addEventListener('click', () => renderLog());
 }
 
-// ---- Leaderboard ------------------------------------------------------------
+// ---- Leaderboard (My Box + Box vs Box) --------------------------------------
 async function renderLeaderboard() {
   setScreenName('Leaderboard');
   content.innerHTML = '<p class="subtitle">Loading…</p>';
-  let data, w;
-  try {
-    if (!todayWorkout) todayWorkout = await api('GET', '/api/workouts/today');
-    w = todayWorkout;
-    data = await api('GET', `/api/leaderboard/${w.id}`);
-  } catch (e) {
-    content.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`;
-    return;
-  }
-
-  const myGym = profile && profile.gym_name ? profile.gym_name : null;
-  const all = data.results || [];
-  // "My Box" filters to athletes at the same gym (interim — becomes a real
-  // boxes table later). Falls back to everyone if the user has no gym set.
-  const rows = (lbFilter === 'box' && myGym)
-    ? all.filter((r) => (r.gym_name || '') === myGym)
-    : all;
+  let w;
+  try { w = await ensureWorkout(); }
+  catch (e) { content.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
 
   content.innerHTML = '';
-  const wrap = el(`
+  const head = el(`
     <div>
       <h1 class="title">${escapeHtml(w.name)} leaderboard</h1>
       <p class="subtitle">${fmtDate(w.wod_date)} · ranked by Holistic Score</p>
-      <div class="toggle" id="lbFilter" style="margin-bottom:14px">
-        <button type="button" data-f="box">My Box</button>
-        <button type="button" data-f="all">Everyone</button>
+      <div class="tabs" id="tabs">
+        <button data-tab="box">My Box</button>
+        <button data-tab="boxes">Box vs Box</button>
       </div>
-      <div id="rows"></div>
+      <div id="lbBody"></div>
     </div>
   `);
-  content.appendChild(wrap);
-
-  const filterEl = wrap.querySelector('#lbFilter');
-  filterEl.querySelectorAll('button').forEach((b) =>
-    b.classList.toggle('active', b.dataset.f === lbFilter));
-  filterEl.addEventListener('click', (e) => {
+  content.appendChild(head);
+  const tabsEl = head.querySelector('#tabs');
+  tabsEl.querySelectorAll('button').forEach((b) => b.classList.toggle('active', b.dataset.tab === lbTab));
+  tabsEl.addEventListener('click', (e) => {
     const b = e.target.closest('button'); if (!b) return;
-    lbFilter = b.dataset.f; renderLeaderboard();
+    lbTab = b.dataset.tab; renderLeaderboard();
   });
 
-  const rowsEl = wrap.querySelector('#rows');
-  if (!rows.length) {
-    rowsEl.appendChild(el(`
-      <div class="empty">
-        ${lbFilter === 'box' && myGym
-          ? `No one from <strong>${escapeHtml(myGym)}</strong> has logged ${escapeHtml(w.name)} yet.`
-          : `No results for ${escapeHtml(w.name)} yet.`}
-        <br/>Be the first — log your time.
-      </div>
-      <button class="btn-primary" id="goLog">Log ${escapeHtml(w.name)}</button>
-    `));
-    rowsEl.querySelector('#goLog').addEventListener('click', () => setView('log'));
+  const body = head.querySelector('#lbBody');
+  if (lbTab === 'box') return renderMyBox(body, w);
+  return renderBoxVsBox(body, w);
+}
+
+async function renderMyBox(body, w) {
+  if (!profile || !profile.box_id) {
+    body.innerHTML = `<div class="empty">Set your gym / box on your profile to see your box leaderboard.</div>`;
     return;
   }
+  body.innerHTML = '<p class="subtitle">Loading…</p>';
+  let data;
+  try { data = await api('GET', `/api/leaderboard/box/${profile.box_id}/${w.workout_id}`); }
+  catch (e) { body.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
 
+  const rows = data.results || [];
+  body.innerHTML = '';
+  body.appendChild(el(`<p class="subtitle" style="margin-top:-4px">${escapeHtml(data.box.name)}</p>`));
+  if (!rows.length) {
+    body.appendChild(el(`
+      <div class="empty">No one from <strong>${escapeHtml(data.box.name)}</strong> has logged ${escapeHtml(w.name)} yet.<br/>Be the first.</div>
+      <button class="btn-primary" id="goLog">Log ${escapeHtml(w.name)}</button>
+    `));
+    body.querySelector('#goLog').addEventListener('click', () => setView('log'));
+    return;
+  }
   rows.forEach((r, i) => {
     const me = r.user_id === userId;
-    rowsEl.appendChild(el(`
+    body.appendChild(el(`
       <div class="lb-row ${me ? 'me' : ''}">
         <div class="lb-rank">${i + 1}</div>
         <div class="lb-main">
           <div class="lb-name">${escapeHtml(r.display_name)}${me ? ' · you' : ''}</div>
-          <div class="lb-sub">${escapeHtml(r.gym_name || 'No box set')} · ${Math.round(r.rom_pct)}% ROM</div>
+          <div class="lb-sub">${Math.round(r.rom_pct)}% ROM · ${r.unbroken_sets} unbroken</div>
         </div>
-        <div class="lb-score">
-          <div class="s">${Number(r.holistic_score)}</div>
-          <div class="t">${fmtTime(r.time_seconds)}</div>
-        </div>
+        <div class="lb-score"><div class="s">${num(r.holistic_score)}</div><div class="t">${fmtTime(r.time_seconds)}</div></div>
       </div>
     `));
+  });
+}
+
+async function renderBoxVsBox(body, w) {
+  body.innerHTML = '<p class="subtitle">Loading…</p>';
+  let data;
+  try { data = await api('GET', `/api/leaderboard/boxes/${w.workout_id}`); }
+  catch (e) { body.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+
+  const boxes = data.boxes || [];
+  body.innerHTML = '';
+  if (!boxes.length) { body.appendChild(el(`<div class="empty">No boxes yet.</div>`)); return; }
+
+  boxes.forEach((b, i) => {
+    const mine = profile && b.box_id === profile.box_id;
+    const pct = Math.round(b.participation * 100);
+    body.appendChild(el(`
+      <div class="box-row ${mine ? 'mine' : ''}">
+        <div class="box-rank">${i + 1}</div>
+        <div class="box-main">
+          <div class="box-name">${escapeHtml(b.name)}${mine ? ' · your box' : ''}</div>
+          <div class="box-breakdown"><b>${b.avg_score}</b> avg × <b>${pct}%</b> turnout · ${b.logged_members}/${b.total_members} logged</div>
+        </div>
+        <div class="box-score">${b.score}</div>
+      </div>
+    `));
+  });
+}
+
+// ---- Feed -------------------------------------------------------------------
+function feedText(ev) {
+  const name = `<b>${escapeHtml(ev.display_name)}</b>`;
+  const p = ev.payload || {};
+  if (ev.type === 'result_logged') {
+    return `${name} logged <b>${escapeHtml(p.workout_name || 'a workout')}</b> — <span class="accent">${num(p.holistic_score)}</span>`;
+  }
+  if (ev.type === 'badge_earned') {
+    return `${name} earned the <span class="accent">${escapeHtml(p.name || 'a')}</span> badge <span class="feed-badge">🏅</span>`;
+  }
+  return `${name} did something`;
+}
+
+async function renderFeed() {
+  setScreenName('Feed');
+  if (!profile || !profile.box_id) {
+    return needBoxPrompt('Set your gym / box on your profile to see your box feed.');
+  }
+  content.innerHTML = '<p class="subtitle">Loading…</p>';
+  let data;
+  try { data = await api('GET', `/api/feed/box/${profile.box_id}`); }
+  catch (e) { content.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+
+  const events = data.events || [];
+  content.innerHTML = '';
+  const wrap = el(`
+    <div>
+      <h1 class="title">${escapeHtml(data.box.name)} feed</h1>
+      <p class="subtitle">What your box is up to</p>
+      <div id="feed"></div>
+    </div>
+  `);
+  content.appendChild(wrap);
+  const list = wrap.querySelector('#feed');
+
+  if (!events.length) {
+    list.appendChild(el(`<div class="empty">No activity yet. Log today's WOD to kick things off.</div>`));
+    return;
+  }
+
+  events.forEach((ev) => {
+    const item = el(`
+      <div class="feed-item">
+        ${avatarHtml(ev.avatar_url, ev.display_name, 'feed-av')}
+        <div class="feed-body">
+          <div class="feed-text">${feedText(ev)}</div>
+          <div class="feed-meta">
+            <span class="feed-time">${timeAgo(ev.created_at)}</span>
+            <button class="kudos" data-id="${escapeAttr(ev.event_id)}">👏 <span class="kudos-n">${ev.kudos}</span></button>
+          </div>
+        </div>
+      </div>
+    `);
+    const btn = item.querySelector('.kudos');
+    btn.addEventListener('click', async () => {
+      try {
+        const r = await api('POST', `/api/feed/${ev.event_id}/kudos`);
+        item.querySelector('.kudos-n').textContent = r.kudos;
+        btn.classList.add('kudosed');
+      } catch (e) { showToast(e.message); }
+    });
+    list.appendChild(item);
   });
 }
 

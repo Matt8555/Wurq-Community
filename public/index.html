@@ -231,6 +231,67 @@
 
     .empty { text-align: center; color: var(--muted); padding: 28px 10px; line-height: 1.5; }
 
+    /* Sub-tabs (My Box / Box vs Box) */
+    .tabs { display: flex; gap: 8px; margin-bottom: 14px; }
+    .tabs button {
+      flex: 1; background: var(--surface-2); border: 1px solid var(--border);
+      color: var(--muted); border-radius: 10px; padding: 10px; cursor: pointer;
+      font-size: 0.82rem; font-weight: 700; letter-spacing: 0.04em;
+    }
+    .tabs button.active { background: var(--acid); color: #10130a; border-color: var(--acid); }
+
+    /* Box-vs-box rows */
+    .box-row {
+      display: flex; align-items: center; gap: 12px;
+      padding: 14px; border: 1px solid var(--border); border-radius: 12px;
+      background: var(--surface); margin-bottom: 8px;
+    }
+    .box-row.mine { border-color: var(--acid); background: var(--acid-dim); }
+    .box-rank { width: 1.6em; text-align: center; font-weight: 800; color: var(--muted); flex: none; }
+    .box-main { flex: 1; min-width: 0; }
+    .box-name { font-weight: 700; font-size: 1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .box-breakdown { color: var(--muted); font-size: 0.74rem; margin-top: 3px; }
+    .box-breakdown b { color: var(--chalk); font-weight: 600; }
+    .box-score { font-weight: 800; color: var(--acid); font-size: 1.2rem; flex: none; }
+
+    /* Feed */
+    .feed-item {
+      display: flex; gap: 12px; padding: 14px;
+      border: 1px solid var(--border); border-radius: 12px;
+      background: var(--surface); margin-bottom: 8px;
+    }
+    .feed-av {
+      width: 40px; height: 40px; border-radius: 50%; flex: none;
+      background: var(--surface-2); border: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 700; color: var(--muted); font-size: 0.85rem; overflow: hidden;
+    }
+    .feed-body { flex: 1; min-width: 0; }
+    .feed-text { font-size: 0.9rem; line-height: 1.4; }
+    .feed-text b { font-weight: 700; }
+    .feed-text .accent { color: var(--acid); font-weight: 700; }
+    .feed-badge { color: var(--acid); }
+    .feed-meta { display: flex; align-items: center; gap: 14px; margin-top: 8px; }
+    .feed-time { color: var(--muted); font-size: 0.72rem; }
+    .kudos {
+      background: var(--surface-2); border: 1px solid var(--border); color: var(--chalk);
+      border-radius: 999px; padding: 5px 12px; cursor: pointer; font-size: 0.78rem; font-weight: 600;
+    }
+    .kudos:hover { border-color: var(--acid); }
+    .kudos.kudosed { background: var(--acid-dim); border-color: var(--acid); color: var(--acid); }
+
+    /* Score reveal animation */
+    .score-reveal .num { animation: pop .5s cubic-bezier(.18,.9,.3,1.3) both; }
+    @keyframes pop { 0% { transform: scale(.4); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }
+    .badge-unlock {
+      margin-top: 14px; padding: 14px; border-radius: 12px;
+      background: var(--acid-dim); border: 1px solid var(--acid);
+      animation: pop .5s .2s cubic-bezier(.18,.9,.3,1.3) both;
+    }
+    .badge-unlock .bu-title { color: var(--acid); font-weight: 800; font-size: 0.78rem; letter-spacing: 0.12em; text-transform: uppercase; }
+    .badge-unlock .bu-name { font-weight: 700; margin-top: 4px; }
+    .badge-unlock .bu-desc { color: var(--muted); font-size: 0.82rem; margin-top: 2px; }
+
     .hidden { display: none !important; }
   </style>
 </head>
@@ -248,7 +309,8 @@
 
     <nav class="nav">
       <a href="#" data-view="log"><span class="ico">▦</span>WOD</a>
-      <a href="#" data-view="leaderboard"><span class="ico">≡</span>Leaderboard</a>
+      <a href="#" data-view="leaderboard"><span class="ico">≡</span>Board</a>
+      <a href="#" data-view="feed"><span class="ico">✦</span>Feed</a>
       <a href="#" data-view="profile" class="active"><span class="ico">◉</span>Profile</a>
     </nav>
 
