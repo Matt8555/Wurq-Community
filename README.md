@@ -99,25 +99,39 @@ profile, save, and reload — it persists.
 
 ## Demo seed data
 
-To make every screen look alive, run the idempotent seed script. Re-running it
-does **not** duplicate anything.
+Run the seed to build a large, living demo world — a month of 10 gyms competing.
 
 ```bash
 DATABASE_URL="postgres://…" npm run seed
 ```
 
-It seeds:
+What it generates (a 4-week window ending today, framed as June 2026):
 
-- **Athlete side:** 4 boxes incl. the home box **CrossFit Pegacorn**, ~30
-  members (with logged Fran results), varied box-vs-box standings, and a feed.
-  Set your profile's gym to *CrossFit Pegacorn* to drop into the populated box.
-- **Owner side:** the owner's box **CrossFit Borderland** with members, historic
-  results (driving streaks + churn-risk recency), rival boxes (incl. *CF South
-  Texas*, *Iron Valley*), and one active throwdown so the owner screens look
-  live. Switch to **Owner view** with the header toggle.
+- **10 boxes** with distinct personalities so the standings tell a story: 2
+  powerhouses (high avg + turnout), 2 up-and-comers (improving over the month),
+  1 large gym with low participation, and 5 mid-pack — including the demo box.
+- **~1,000 athletes** (~100 per box) with names, experience levels (mostly
+  intermediate/RX), and a home box.
+- **~16,500 logged results** across ~28 daily WODs (Fran, Cindy, Helen, Grace,
+  etc.). Participation varies per athlete (near-daily / regular / sporadic /
+  lapsed), each athlete has a consistent ability with day-to-day variance and
+  slight monthly improvement, and every Holistic Score is computed by the
+  server-side scoring module. This realistic spread powers the churn and streak
+  features.
+- **Box-vs-box standings** that rank by personality, with a tight rivalry around
+  the demo box; **3 completed + 1 active** head-to-head challenge; streaks,
+  badge unlocks spread across the month, and a populated per-box feed.
 
-The Community/Circle tab's posts are a front-end mock and always render, so they
-aren't part of the seed.
+**Performance & idempotency:** results load via batched multi-row INSERTs (not
+one at a time); the whole run takes ~1–2s. The script **rebuilds the world
+deterministically** each run (it resets the world tables, then regenerates from
+a fixed PRNG seed), so counts are stable and there are no leftovers. Any
+live-created demo data is reset on re-seed.
+
+The demo box **CrossFit Borderland** is both the athlete home box and the owner
+box: set your athlete gym to it, or switch to **Owner view** with the header
+toggle. The Community/Circle tab's posts are a front-end mock and always render,
+so they aren't part of the seed.
 
 ## Branding
 

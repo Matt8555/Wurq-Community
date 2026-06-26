@@ -1,355 +1,362 @@
 'use strict';
 
 // ============================================================================
-// Demo seed — populates a realistic, "alive" world so the demo user drops into
-// a populated portal. Safe to re-run: it is IDEMPOTENT (deterministic emails +
-// ON CONFLICT upserts; seeded feed events are tagged and replaced, never
-// duplicated). Real user-generated data is left untouched.
+// Demo world seed — a living month of 10 CrossFit boxes competing through the
+// 4 weeks ending today (framed as June 2026). ~1,000 athletes, tens of
+// thousands of logged results, box-vs-box standings that match each gym's
+// personality, head-to-head challenges, streaks, badges, and feeds.
 //
 //   npm run seed        (or: node seed.js)
 //
-// The Community/Circle tab's posts are a front-end mock (see public/app.js), so
-// they are not seeded here — they always render.
+// IDEMPOTENT + RE-RUNNABLE: rebuilds the world deterministically each run. It
+// resets the world tables (boxes/memberships/workouts/results/challenges/
+// feed/user_badges) and regenerates from a fixed PRNG seed, so counts are
+// stable and there are no leftovers. A deterministic athlete keeps a consistent
+// ability across workouts (with day-to-day variance and slight monthly
+// improvement), so leaderboards are stable-but-not-identical.
+//
+// BULK INSERTS: results (15k–20k rows) go in via batched multi-row INSERTs, not
+// one at a time. Holistic Scores reuse the server-side scoring module.
+//
+// The Community/Circle tab posts are a front-end mock (public/app.js) and always
+// render, so they are not part of this DB seed.
 // ============================================================================
 
 const { pool, migrate } = require('./db');
 const { computeHolisticScore } = require('./holisticScore');
 
-const HOME_BOX = 'CrossFit Pegacorn'; // the box the demo user should join
+const SEED = 20260601;            // fixed base seed -> reproducible world
+const DAYS = 28;                  // days of activity ending today (k=0 = today)
+const FRAN_DAYS = new Set([0, 13, 24]); // days whose WOD is Fran (k=0 = today's WOD)
+const HOME_BOX = 'CrossFit Borderland'; // demo athlete home box AND owner box
 
-const BOXES = [
-  { name: 'CrossFit Pegacorn',              location: 'Norfolk, VA' },
-  { name: 'Iron Forge CrossFit',            location: 'Richmond, VA' },
-  { name: 'Summit Strength & Conditioning', location: 'Denver, CO' },
-  { name: 'Tidewater CrossFit',             location: 'Virginia Beach, VA' },
+// ---- deterministic PRNG -----------------------------------------------------
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
+const lerp = (a, b, t) => a + (b - a) * t;
+
+// ---- box personalities (10) -------------------------------------------------
+// persona drives ability (avg score) + engagement (participation) + improve
+// (monthly ramp). Score = avg holistic × participation, so personalities sort
+// the standings: powerhouses top, large-but-disengaged low, mid-pack clustered.
+const BOX_DEFS = [
+  { name: 'Apex CrossFit',          loc: 'Austin, TX',         persona: 'power',   size: 105, ability: 0.78, eng: 1.25, improve: 0.20 },
+  { name: 'Iron Valley CrossFit',   loc: 'Phoenix, AZ',        persona: 'power',   size: 100, ability: 0.75, eng: 1.22, improve: 0.20 },
+  { name: 'Rising Tide CrossFit',   loc: 'Tampa, FL',          persona: 'upcomer', size: 98,  ability: 0.60, eng: 1.00, improve: 1.00 },
+  { name: 'Forge & Anvil CrossFit', loc: 'Denver, CO',         persona: 'upcomer', size: 96,  ability: 0.58, eng: 1.00, improve: 1.00 },
+  { name: 'Metroplex CrossFit',     loc: 'Dallas, TX',         persona: 'large',   size: 150, ability: 0.61, eng: 0.55, improve: 0.20 },
+  { name: HOME_BOX,                 loc: 'Brownsville, TX',    persona: 'mid',     size: 100, ability: 0.585, eng: 1.00, improve: 0.30 },
+  { name: 'Summit CrossFit',        loc: 'Salt Lake City, UT', persona: 'mid',     size: 100, ability: 0.585, eng: 1.00, improve: 0.30 },
+  { name: 'CF South Texas',         loc: 'San Antonio, TX',    persona: 'mid',     size: 100, ability: 0.59,  eng: 0.99, improve: 0.30 },
+  { name: 'Granite City CrossFit',  loc: 'Boston, MA',         persona: 'mid',     size: 100, ability: 0.55, eng: 0.92, improve: 0.25 },
+  { name: 'Coastal CrossFit',       loc: 'San Diego, CA',      persona: 'mid',     size: 100, ability: 0.56, eng: 0.90, improve: 0.25 },
 ];
 
-// Per box: athletes who LOGGED today's Fran (time s / ROM % / unbroken sets),
-// plus a count of extra members who are signed up but didn't log — so turnout
-// (participation) varies and box-vs-box looks genuine.
-const ROSTER = {
-  'CrossFit Pegacorn': {
-    loggers: [
-      { name: 'Coach Riley',     exp: 'competitor',   t: 174, rom: 100, sets: 6 },
-      { name: 'Marcus Lee',      exp: 'competitor',   t: 165, rom: 95,  sets: 7 },
-      { name: 'Ava Thompson',    exp: 'RX',           t: 188, rom: 98,  sets: 5 },
-      { name: 'Jordan Diaz',     exp: 'RX',           t: 205, rom: 100, sets: 6 },
-      { name: 'Priya Nair',      exp: 'intermediate', t: 242, rom: 92,  sets: 9 },
-      { name: 'Chloe Bennett',   exp: 'intermediate', t: 271, rom: 88,  sets: 11 },
-    ],
-    extra: 2,
-  },
-  'Iron Forge CrossFit': {
-    loggers: [
-      { name: 'Tyrone Walker',   exp: 'competitor',   t: 158, rom: 96,  sets: 6 },
-      { name: 'Elena Petrova',   exp: 'RX',           t: 197, rom: 99,  sets: 5 },
-      { name: 'Diego Morales',   exp: 'RX',           t: 219, rom: 94,  sets: 8 },
-      { name: 'Hannah Schmidt',  exp: 'intermediate', t: 258, rom: 90,  sets: 10 },
-      { name: 'Wei Chen',        exp: 'beginner',     t: 322, rom: 82,  sets: 12 },
-    ],
-    extra: 4,
-  },
-  'Summit Strength & Conditioning': {
-    loggers: [
-      { name: 'Brooke Sullivan', exp: 'RX',           t: 192, rom: 97,  sets: 6 },
-      { name: 'Andre Johnson',   exp: 'competitor',   t: 171, rom: 93,  sets: 7 },
-      { name: 'Mei Tanaka',      exp: 'intermediate', t: 248, rom: 91,  sets: 9 },
-      { name: 'Liam O\'Connor',  exp: 'intermediate', t: 264, rom: 89,  sets: 10 },
-      { name: 'Fatima Hassan',   exp: 'beginner',     t: 305, rom: 84,  sets: 11 },
-    ],
-    extra: 1,
-  },
-  'Tidewater CrossFit': {
-    loggers: [
-      { name: 'Noah Williams',   exp: 'RX',           t: 184, rom: 96,  sets: 6 },
-      { name: 'Sofia Rossi',     exp: 'RX',           t: 211, rom: 98,  sets: 5 },
-      { name: 'Jamal Carter',    exp: 'intermediate', t: 255, rom: 90,  sets: 9 },
-      { name: 'Grace Kim',       exp: 'beginner',     t: 298, rom: 85,  sets: 12 },
-    ],
-    extra: 3,
-  },
+const ARCHETYPES = {
+  power:   { streak: 0.15, regular: 0.65, sporadic: 0.12, lapsed: 0.08 },
+  upcomer: { streak: 0.10, regular: 0.62, sporadic: 0.18, lapsed: 0.10 },
+  large:   { streak: 0.05, regular: 0.45, sporadic: 0.30, lapsed: 0.20 },
+  mid:     { streak: 0.09, regular: 0.58, sporadic: 0.20, lapsed: 0.13 },
 };
+const BASE_PROB = { streak: 0.92, regular: 0.72, sporadic: 0.38, lapsed: 0.48 };
 
-// ---- Owner-side demo world --------------------------------------------------
-const OWNER_BOX = 'CrossFit Borderland'; // the box the demo owner owns
+const FIRST = ['Alex', 'Maria', 'James', 'Sofia', 'Liam', 'Emma', 'Noah', 'Olivia', 'Mateo', 'Ava',
+  'Diego', 'Isabella', 'Lucas', 'Mia', 'Ethan', 'Camila', 'Mason', 'Luna', 'Logan', 'Harper',
+  'Andre', 'Priya', 'Marcus', 'Nina', 'Tariq', 'Wei', 'Yuki', 'Omar', 'Elena', 'Jamal',
+  'Sara', 'Kofi', 'Ingrid', 'Pablo', 'Aisha', 'Rohan', 'Bianca', 'Hector', 'Lucia', 'Tomas'];
+const LAST = ['Smith', 'Garcia', 'Johnson', 'Lee', 'Brown', 'Martinez', 'Davis', 'Lopez', 'Nguyen', 'Wilson',
+  'Walker', 'Reyes', 'Cruz', 'Patel', 'Kim', 'Rossi', 'Hassan', 'Petrova', 'Okafor', 'Chen',
+  'Morales', 'Schmidt', 'Tanaka', 'Larsen', 'Carter', 'Vega', 'Flores', 'Mendez', 'Navarro', 'Stone',
+  'Brooks', 'Pace', 'Salas', 'Guerra', 'Ruiz', 'Tovar', 'Vargas', 'Castro', 'Aguilar', 'Salinas'];
 
-// Borderland members. `today` = logged today's Fran (counts for participation +
-// box-vs-box). `hist` = additional days-ago they logged (drives streaks, this-
-// week participation, and churn recency). Some never log (churn risk).
-const BORDERLAND = [
-  { name: 'Mateo Salas',   exp: 'competitor',   today: { t: 158, rom: 96,  sets: 6 },  hist: [1, 2, 3, 5] },
-  { name: 'Rosa Mendez',   exp: 'RX',           today: { t: 165, rom: 98,  sets: 7 },  hist: [1, 2, 3] },
-  { name: 'Tomas Guerra',  exp: 'RX',           today: { t: 188, rom: 95,  sets: 6 },  hist: [1, 2] },
-  { name: 'Hector Vega',   exp: 'intermediate', today: { t: 241, rom: 90,  sets: 9 },  hist: [1, 4] },
-  { name: 'Bianca Ruiz',   exp: 'RX',           today: { t: 205, rom: 100, sets: 6 },  hist: [2] },
-  { name: 'Lucia Flores',  exp: 'intermediate', today: { t: 271, rom: 88,  sets: 11 }, hist: [3] },
-  { name: 'Andres Pena',   exp: 'beginner',     today: { t: 310, rom: 82,  sets: 12 }, hist: [] },
-  { name: 'Sofia Lara',    exp: 'intermediate', today: null,                            hist: [2] },
-  { name: 'Javier Castro', exp: 'beginner',     today: null,                            hist: [3] },
-  { name: 'Marisol Tovar', exp: 'intermediate', today: null,                            hist: [12] },
-  { name: 'Diego Navarro', exp: 'RX',           today: null,                            hist: [15] },
-  { name: 'Pablo Reyes',   exp: 'beginner',     today: null,                            hist: [18] },
-  { name: 'Elena Vargas',  exp: 'intermediate', today: null,                            hist: [11] },
-  { name: 'Camila Ortiz',  exp: 'beginner',     today: null,                            hist: [] },
+const WOD_LIB = [
+  { name: 'Cindy', type: 'AMRAP 20', base: 250 }, { name: 'Helen', type: '3 RFT', base: 270 },
+  { name: 'Grace', type: 'For Time', base: 180 }, { name: 'Diane', type: 'For Time', base: 240 },
+  { name: 'Annie', type: 'For Time', base: 210 }, { name: 'Karen', type: 'For Time', base: 300 },
+  { name: 'Jackie', type: 'For Time', base: 230 }, { name: 'Nancy', type: '5 RFT', base: 320 },
+  { name: 'Angie', type: 'For Time', base: 340 }, { name: 'Chelsea', type: 'EMOM 30', base: 300 },
+  { name: 'DT', type: '5 RFT', base: 280 }, { name: 'Kelly', type: '5 RFT', base: 360 },
+  { name: 'Back Squat 5x5', type: 'Strength', base: 300 }, { name: 'Deadlift Build', type: 'Strength', base: 300 },
+  { name: 'Snatch EMOM 12', type: 'EMOM', base: 240 }, { name: 'Strict Press 5x3', type: 'Strength', base: 270 },
+  { name: 'Row 2k', type: 'For Time', base: 260 }, { name: 'Wall Ball AMRAP', type: 'AMRAP 15', base: 230 },
+  { name: 'Box Jump RFT', type: '4 RFT', base: 250 }, { name: 'Fight Gone Bad', type: '3 Rounds', base: 320 },
+  { name: 'Filthy Fifty', type: 'For Time', base: 380 }, { name: 'Isabel', type: 'For Time', base: 170 },
+  { name: 'Randy', type: 'For Time', base: 200 }, { name: 'Elizabeth', type: 'For Time', base: 230 },
+  { name: 'Amanda', type: 'For Time', base: 190 },
 ];
 
-// Rival boxes (logged today's Fran) so box-vs-box + the throwdown look live.
-const RIVALS = {
-  'CF South Texas': {
-    location: 'San Antonio, TX',
-    loggers: [
-      { name: 'Carlos Reyna',   t: 162, rom: 97, sets: 6 },
-      { name: 'Daniela Cruz',   t: 179, rom: 99, sets: 5 },
-      { name: 'Omar Salinas',   t: 214, rom: 93, sets: 8 },
-      { name: 'Nayeli Ramos',   t: 248, rom: 91, sets: 9 },
-      { name: 'Beto Aguilar',   t: 295, rom: 85, sets: 11 },
-    ],
-    extra: 2,
-  },
-  'Iron Valley': {
-    location: 'El Paso, TX',
-    loggers: [
-      { name: 'Sterling Pace',  t: 156, rom: 98, sets: 6 },
-      { name: 'Maya Brooks',    t: 183, rom: 96, sets: 6 },
-      { name: 'Caleb Stone',    t: 201, rom: 94, sets: 7 },
-      { name: 'Ivy Larsen',     t: 236, rom: 92, sets: 9 },
-    ],
-    extra: 1,
-  },
-};
+const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+const expFor = (a) => (a >= 0.88 ? 'competitor' : a >= 0.62 ? 'RX' : a >= 0.42 ? 'intermediate' : 'beginner');
 
-const BENCH = ['Cindy', 'Grace', 'Helen', 'Diane', 'Annie', 'Karen', 'Jackie', 'Nancy', 'Angie', 'Barbara'];
-
-function slug(s) { return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''); }
-function emailFor(name, box) { return `${slug(name)}.${slug(box)}@wurqdemo.io`; }
-
-async function getOrCreateBox(client, name, location) {
-  const { rows } = await client.query(
-    `INSERT INTO boxes (name, location) VALUES ($1, $2)
-       ON CONFLICT (name) DO UPDATE SET location = EXCLUDED.location
-       RETURNING box_id`, [name, location]);
-  return rows[0].box_id;
+function pickArchetype(rng, persona) {
+  const mix = ARCHETYPES[persona];
+  const r = rng();
+  if (r < mix.streak) return 'streak';
+  if (r < mix.streak + mix.regular) return 'regular';
+  if (r < mix.streak + mix.regular + mix.sporadic) return 'sporadic';
+  return 'lapsed';
 }
 
-// Get-or-create a workout dated `daysAgo` days back (same day -> same row).
-async function getOrCreateWorkout(client, name, daysAgo) {
-  const { rows } = await client.query(
-    `WITH ins AS (
-       INSERT INTO workouts (name, type, description, wod_date)
-       SELECT $1, 'For Time', 'Benchmark WOD.', CURRENT_DATE - ($2)::int
-       WHERE NOT EXISTS (SELECT 1 FROM workouts WHERE name = $1 AND wod_date = CURRENT_DATE - ($2)::int)
-       RETURNING workout_id)
-     SELECT workout_id FROM ins
-     UNION ALL
-     SELECT workout_id FROM workouts WHERE name = $1 AND wod_date = CURRENT_DATE - ($2)::int
-     LIMIT 1`, [name, daysAgo]);
-  return rows[0].workout_id;
+// Build the whole world in memory (deterministic), then bulk-load it.
+function generateWorld() {
+  const athletes = []; // { email, name, exp, boxName, results:[{k,time,rom,sets,holistic}] , firstK, franBestK }
+  let bIndex = 0;
+  for (const box of BOX_DEFS) {
+    for (let i = 0; i < box.size; i++) {
+      const rng = mulberry32(SEED + bIndex * 100003 + i * 17);
+      const ability = clamp(box.ability + (rng() * 2 - 1) * 0.17, 0.18, 0.97);
+      const arche = pickArchetype(rng, box.persona);
+      const name = `${FIRST[Math.floor(rng() * FIRST.length)]} ${LAST[Math.floor(rng() * LAST.length)]}`;
+      const email = `a${i}.${slug(box.name)}@wurqdemo.io`;
+
+      // Lapsed athletes quit ~11–20 days ago; a few never log at all.
+      const quitK = arche === 'lapsed' ? Math.floor(11 + rng() * 10) : -1;
+      const neverLogs = arche === 'lapsed' && rng() < 0.15;
+      const streakLen = arche === 'streak' ? Math.floor(10 + rng() * 11) : 0; // 10–20 day current streak
+
+      const results = [];
+      let firstK = -1, franBestK = -1;
+      if (!neverLogs) {
+        for (let k = DAYS - 1; k >= 0; k--) { // oldest -> today
+          const prog = (DAYS - 1 - k) / (DAYS - 1); // 0 oldest .. 1 today
+          if (arche === 'lapsed' && k < quitK) continue; // quit: nothing recent
+          let train;
+          if (arche === 'streak' && k < streakLen) {
+            train = true; // forced current streak
+          } else {
+            let engMult = box.eng;
+            if (box.persona === 'upcomer') engMult = lerp(0.62, 1.2, prog); // ramps up over month
+            const prob = clamp(BASE_PROB[arche] * engMult, 0.05, 0.97);
+            train = rng() < prob;
+          }
+          if (!train) continue;
+
+          const eff = clamp(ability + box.improve * 0.15 * prog + (rng() * 2 - 1) * 0.06, 0.05, 0.99);
+          const isFran = FRAN_DAYS.has(k);
+          const base = isFran ? 200 : WOD_LIB[k % WOD_LIB.length].base;
+          const rom = clamp(Math.round(72 + eff * 28 + (rng() * 2 - 1) * 4), 60, 100);
+          const sets = clamp(Math.round(3 + eff * 9 + (rng() * 2 - 1) * 1.5), 1, 14);
+          const time = clamp(Math.round(base * (1.45 - eff * 0.7) + (rng() * 2 - 1) * 22), 90, 900);
+          const holistic = computeHolisticScore({ time_seconds: time, rom_pct: rom, unbroken_sets: sets });
+          results.push({ k, time, rom, sets, holistic });
+          if (firstK < 0 || k > firstK) firstK = k; // earliest day = largest k
+          if (isFran && time < 240 && (franBestK < 0 || k > franBestK)) franBestK = k;
+        }
+      }
+      athletes.push({ email, name, exp: expFor(ability), boxName: box.name, results, firstK, franBestK });
+      // keep firstK as the *earliest* (largest k) training day
+    }
+    bIndex++;
+  }
+  return athletes;
 }
 
-async function upsertResultAt(client, userId, workoutId, a, daysAgo) {
-  const holistic = computeHolisticScore({ time_seconds: a.t, rom_pct: a.rom, unbroken_sets: a.sets });
-  await client.query(
-    `INSERT INTO results (user_id, workout_id, time_seconds, rom_pct, unbroken_sets, holistic_score, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, now() - ($7 || ' days')::interval)
-       ON CONFLICT (user_id, workout_id) DO UPDATE SET
-         time_seconds = EXCLUDED.time_seconds, rom_pct = EXCLUDED.rom_pct,
-         unbroken_sets = EXCLUDED.unbroken_sets, holistic_score = EXCLUDED.holistic_score,
-         created_at = now() - ($7 || ' days')::interval`,
-    [userId, workoutId, a.t, a.rom, a.sets, holistic, String(daysAgo)]);
+// ---- bulk helpers -----------------------------------------------------------
+async function bulkInsert(client, table, columns, rows, conflict = '') {
+  if (!rows.length) return;
+  const perRow = columns.length;
+  const maxRows = Math.max(1, Math.floor(55000 / perRow));
+  for (let i = 0; i < rows.length; i += maxRows) {
+    const chunk = rows.slice(i, i + maxRows);
+    const params = [];
+    const values = chunk.map((r) => {
+      const ph = r.map((_, ci) => `$${params.length + ci + 1}`);
+      params.push(...r);
+      return `(${ph.join(',')})`;
+    });
+    await client.query(`INSERT INTO ${table} (${columns.join(',')}) VALUES ${values.join(',')} ${conflict}`, params);
+  }
 }
 
-async function upsertUser(client, email) {
-  const { rows } = await client.query(
-    `INSERT INTO users (email) VALUES ($1)
-       ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email
-       RETURNING user_id`, [email]);
-  return rows[0].user_id;
+async function upsertUsersReturning(client, emails) {
+  const map = new Map();
+  const maxRows = 20000;
+  for (let i = 0; i < emails.length; i += maxRows) {
+    const chunk = emails.slice(i, i + maxRows);
+    const values = chunk.map((_, ci) => `($${ci + 1})`).join(',');
+    const { rows } = await client.query(
+      `INSERT INTO users (email) VALUES ${values}
+         ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email
+         RETURNING user_id, email`, chunk);
+    rows.forEach((r) => map.set(r.email, r.user_id));
+  }
+  return map;
 }
 
-async function upsertProfile(client, userId, { display_name, gym_name, exp }) {
-  await client.query(
-    `INSERT INTO profiles (user_id, display_name, gym_name, experience_level, profile_complete, updated_at)
-       VALUES ($1, $2, $3, $4, true, now())
-       ON CONFLICT (user_id) DO UPDATE SET
-         display_name = EXCLUDED.display_name,
-         gym_name = EXCLUDED.gym_name,
-         experience_level = EXCLUDED.experience_level,
-         profile_complete = true,
-         updated_at = now()`,
-    [userId, display_name, gym_name, exp]);
-}
-
-async function joinBox(client, userId, boxId) {
-  await client.query(
-    `INSERT INTO box_memberships (user_id, box_id) VALUES ($1, $2)
-       ON CONFLICT (user_id, box_id) DO NOTHING`, [userId, boxId]);
-  await client.query(
-    `DELETE FROM box_memberships WHERE user_id = $1 AND box_id <> $2`, [userId, boxId]);
-}
-
-async function upsertResult(client, userId, workoutId, a) {
-  const holistic = computeHolisticScore({ time_seconds: a.t, rom_pct: a.rom, unbroken_sets: a.sets });
-  await client.query(
-    `INSERT INTO results (user_id, workout_id, time_seconds, rom_pct, unbroken_sets, holistic_score)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (user_id, workout_id) DO UPDATE SET
-         time_seconds = EXCLUDED.time_seconds, rom_pct = EXCLUDED.rom_pct,
-         unbroken_sets = EXCLUDED.unbroken_sets, holistic_score = EXCLUDED.holistic_score,
-         created_at = now()`,
-    [userId, workoutId, a.t, a.rom, a.sets, holistic]);
-  return holistic;
-}
-
-async function awardBadge(client, userId, code) {
-  await client.query(
-    `INSERT INTO user_badges (user_id, badge_id)
-       SELECT $1, badge_id FROM badges WHERE code = $2
-       ON CONFLICT (user_id, badge_id) DO NOTHING`, [userId, code]);
-}
-
+// ---- main -------------------------------------------------------------------
 async function main() {
-  await migrate(); // ensure schema + today's Fran + base badges exist
+  await migrate(); // ensure schema + base badges exist
+
+  const anchorRow = await pool.query(`SELECT to_char(CURRENT_DATE, 'YYYY-MM-DD') AS d`);
+  const [Y, M, D] = anchorRow.rows[0].d.split('-').map(Number);
+  const dayStr = (k) => new Date(Date.UTC(Y, M - 1, D - k, 12)).toISOString().slice(0, 10);
+  const ts = (k) => `${dayStr(k)} 12:00:00`;
+
+  const athletes = generateWorld();
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
-    // Today's Fran.
-    const wod = await client.query(
-      `SELECT workout_id, name FROM workouts WHERE wod_date = CURRENT_DATE ORDER BY name LIMIT 1`);
-    const workoutId = wod.rows[0].workout_id;
+    // Reset the world (deterministic rebuild). FK-safe order.
+    await client.query('DELETE FROM feed_events');
+    await client.query('DELETE FROM user_badges');
+    await client.query('DELETE FROM challenges');
+    await client.query('DELETE FROM results');
+    await client.query('DELETE FROM box_memberships');
+    await client.query('DELETE FROM workouts');
+    await client.query('DELETE FROM boxes');
 
+    // Boxes
     const boxIds = {};
-    const idByName = {}; // display_name -> user_id (home box, for feed)
-
-    for (const box of BOXES) {
-      const b = await client.query(
-        `INSERT INTO boxes (name, location) VALUES ($1, $2)
-           ON CONFLICT (name) DO UPDATE SET location = EXCLUDED.location
-           RETURNING box_id`, [box.name, box.location]);
-      const boxId = b.rows[0].box_id;
-      boxIds[box.name] = boxId;
-
-      const roster = ROSTER[box.name];
-
-      for (const a of roster.loggers) {
-        const userId = await upsertUser(client, emailFor(a.name, box.name));
-        await upsertProfile(client, userId, { display_name: a.name, gym_name: box.name, exp: a.exp });
-        await joinBox(client, userId, boxId);
-        await upsertResult(client, userId, workoutId, a);
-        await awardBadge(client, userId, 'first_log');
-        if (a.t < 240) await awardBadge(client, userId, 'sub_4_fran');
-        if (box.name === HOME_BOX) idByName[a.name] = userId;
-      }
-
-      // Extra members who haven't logged (drives participation < 100%).
-      for (let i = 0; i < roster.extra; i++) {
-        const name = `${box.name.split(' ')[0]} Member ${i + 1}`;
-        const userId = await upsertUser(client, emailFor(name, box.name));
-        await upsertProfile(client, userId, { display_name: name, gym_name: box.name, exp: 'beginner' });
-        await joinBox(client, userId, boxId);
-      }
+    for (const b of BOX_DEFS) {
+      const { rows } = await client.query(
+        `INSERT INTO boxes (name, location) VALUES ($1, $2) RETURNING box_id`, [b.name, b.loc]);
+      boxIds[b.name] = rows[0].box_id;
     }
 
-    // ---- Feed events (home box) — tagged so a re-run replaces, not duplicates.
-    await client.query(`DELETE FROM feed_events WHERE payload->>'seed' = 'true'`);
+    // Workouts (one per day; FRAN_DAYS use 'Fran' so today's WOD is Fran)
+    const workoutIds = {};
+    for (let k = 0; k < DAYS; k++) {
+      const w = FRAN_DAYS.has(k)
+        ? { name: 'Fran', type: 'For Time', base: 200 }
+        : WOD_LIB[k % WOD_LIB.length];
+      const desc = w.name === 'Fran'
+        ? '21-15-9 reps for time: Thrusters (95/65 lb) and Pull-ups.'
+        : `${w.name} — ${w.type}.`;
+      const { rows } = await client.query(
+        `INSERT INTO workouts (name, type, description, wod_date) VALUES ($1, $2, $3, $4::date)
+           RETURNING workout_id`, [w.name, w.type, desc, dayStr(k)]);
+      workoutIds[k] = rows[0].workout_id;
+    }
+    const franTodayId = workoutIds[0];
 
-    const score = (name) => {
-      const a = ROSTER[HOME_BOX].loggers.find((x) => x.name === name);
-      return computeHolisticScore({ time_seconds: a.t, rom_pct: a.rom, unbroken_sets: a.sets });
-    };
-    const FEED = [
-      { who: 'Marcus Lee',   type: 'result_logged', minsAgo: 12,   kudos: 14,
-        payload: { workout_name: 'Fran', holistic_score: score('Marcus Lee'), time_seconds: 165 } },
-      { who: 'Jordan Diaz',  type: 'badge_earned',  minsAgo: 40,   kudos: 9,
-        payload: { name: 'Sub-4 Fran', description: 'Completed Fran in under 4 minutes.' } },
-      { who: 'Priya Nair',   type: 'result_logged', minsAgo: 125,  kudos: 6,
-        payload: { workout_name: 'Fran', holistic_score: score('Priya Nair'), time_seconds: 242 } },
-      { who: 'Coach Riley',  type: 'coach_post',    minsAgo: 190,  kudos: 22,
-        payload: { text: 'Huge effort on Fran today, Pegacorn 💪 Mobility session at 6pm — bring a band.' } },
-      { who: 'Ava Thompson', type: 'badge_earned',  minsAgo: 360,  kudos: 31,
-        payload: { name: 'Century', description: 'Logged your 100th result.' } },
-      { who: 'Chloe Bennett',type: 'result_logged', minsAgo: 480,  kudos: 4,
-        payload: { workout_name: 'Fran', holistic_score: score('Chloe Bennett'), time_seconds: 271 } },
-      { who: 'Coach Riley',  type: 'coach_post',    minsAgo: 1440, kudos: 17,
-        payload: { text: 'Sign-ups open for Saturday\'s partner throwdown — grab a partner in the replies!' } },
+    // Users (bulk) -> id map
+    const emailToId = await upsertUsersReturning(client, athletes.map((a) => a.email));
+    athletes.forEach((a) => { a.userId = emailToId.get(a.email); });
+
+    // Profiles + memberships (bulk)
+    await bulkInsert(client, 'profiles',
+      ['user_id', 'display_name', 'gym_name', 'experience_level', 'profile_complete', 'updated_at'],
+      athletes.map((a) => [a.userId, a.name, a.boxName, a.exp, true, ts(0)]),
+      `ON CONFLICT (user_id) DO UPDATE SET display_name = EXCLUDED.display_name,
+         gym_name = EXCLUDED.gym_name, experience_level = EXCLUDED.experience_level,
+         profile_complete = true, updated_at = EXCLUDED.updated_at`);
+    await bulkInsert(client, 'box_memberships', ['user_id', 'box_id', 'joined_at'],
+      athletes.map((a) => [a.userId, boxIds[a.boxName], ts(DAYS - 1)]),
+      'ON CONFLICT (user_id, box_id) DO NOTHING');
+
+    // Results (bulk — the big one)
+    const resultRows = [];
+    for (const a of athletes) {
+      for (const r of a.results) {
+        resultRows.push([a.userId, workoutIds[r.k], r.time, r.rom, r.sets, r.holistic, ts(r.k)]);
+      }
+    }
+    await bulkInsert(client, 'results',
+      ['user_id', 'workout_id', 'time_seconds', 'rom_pct', 'unbroken_sets', 'holistic_score', 'created_at'],
+      resultRows,
+      `ON CONFLICT (user_id, workout_id) DO UPDATE SET time_seconds = EXCLUDED.time_seconds,
+         rom_pct = EXCLUDED.rom_pct, unbroken_sets = EXCLUDED.unbroken_sets,
+         holistic_score = EXCLUDED.holistic_score, created_at = EXCLUDED.created_at`);
+
+    // Badges: first_log (earliest training day) + sub_4_fran (earliest sub-240 Fran)
+    const badgeRow = await client.query(`SELECT code, badge_id FROM badges`);
+    const badgeId = Object.fromEntries(badgeRow.rows.map((r) => [r.code, r.badge_id]));
+    const ubRows = [];
+    for (const a of athletes) {
+      if (a.firstK >= 0 && badgeId.first_log) ubRows.push([a.userId, badgeId.first_log, ts(a.firstK)]);
+      if (a.franBestK >= 0 && badgeId.sub_4_fran) ubRows.push([a.userId, badgeId.sub_4_fran, ts(a.franBestK)]);
+    }
+    await bulkInsert(client, 'user_badges', ['user_id', 'badge_id', 'earned_at'], ubRows,
+      'ON CONFLICT (user_id, badge_id) DO NOTHING');
+
+    // Feed events: badge unlocks (spread), recent results, coach posts.
+    const feedRows = []; // [user_id, type, payload, kudos, created_at]
+    const frng = mulberry32(SEED + 999);
+    for (const a of athletes) {
+      // badge_earned for sub_4_fran unlocks (spread across the Fran days)
+      if (a.franBestK >= 0) {
+        feedRows.push([a.userId, 'badge_earned',
+          JSON.stringify({ name: 'Sub-4 Fran', description: 'Completed Fran in under 4 minutes.', seed: 'true' }),
+          Math.floor(frng() * 20), ts(a.franBestK)]);
+      }
+      // result_logged for recent results (last 3 days) -> fills every box feed
+      for (const r of a.results) {
+        if (r.k <= 2) {
+          feedRows.push([a.userId, 'result_logged',
+            JSON.stringify({ workout_name: FRAN_DAYS.has(r.k) ? 'Fran' : WOD_LIB[r.k % WOD_LIB.length].name,
+              holistic_score: r.holistic, time_seconds: r.time, seed: 'true' }),
+            Math.floor(frng() * 18), ts(r.k)]);
+        }
+      }
+    }
+    // Coach posts: 3 per box from a random member, varied timestamps.
+    const COACH = [
+      'Great work this week, team 💪 Mobility session Friday 6pm.',
+      'Sign-ups open for the next throwdown — grab a partner!',
+      'Reminder: scale to keep intensity. Form first, then load.',
+      'New PR board is up — go chase a number this week.',
+      'Welcome our new members 👋 say hi at the next class.',
     ];
-
-    for (const f of FEED) {
-      const uid = idByName[f.who];
-      if (!uid) continue;
-      const payload = { ...f.payload, seed: 'true' };
-      await client.query(
-        `INSERT INTO feed_events (user_id, type, payload, kudos, created_at)
-           VALUES ($1, $2, $3, $4, now() - ($5 || ' minutes')::interval)`,
-        [uid, f.type, JSON.stringify(payload), f.kudos, String(f.minsAgo)]);
-    }
-
-    // ---- Owner world: CrossFit Borderland + rivals + active challenge -------
-    const HIST_STATS = { t: 235, rom: 91, sets: 8 };
-    const borderlandId = await getOrCreateBox(client, OWNER_BOX, 'Brownsville, TX');
-
-    for (const m of BORDERLAND) {
-      const uid = await upsertUser(client, emailFor(m.name, OWNER_BOX));
-      await upsertProfile(client, uid, { display_name: m.name, gym_name: OWNER_BOX, exp: m.exp });
-      await joinBox(client, uid, borderlandId);
-      if (m.today) {
-        await upsertResult(client, uid, workoutId, m.today); // today's Fran
-        await awardBadge(client, uid, 'first_log');
-        if (m.today.t < 240) await awardBadge(client, uid, 'sub_4_fran');
-      }
-      for (const d of m.hist) {
-        const wId = await getOrCreateWorkout(client, BENCH[d % BENCH.length], d);
-        await upsertResultAt(client, uid, wId, HIST_STATS, d);
-        await awardBadge(client, uid, 'first_log');
+    for (const b of BOX_DEFS) {
+      const members = athletes.filter((a) => a.boxName === b.name);
+      for (let c = 0; c < 3; c++) {
+        const m = members[Math.floor(frng() * members.length)];
+        if (!m) continue;
+        // Recent (last 3 days) so coach posts surface alongside PRs in the feed.
+        feedRows.push([m.userId, 'coach_post',
+          JSON.stringify({ text: COACH[(c + BOX_DEFS.indexOf(b)) % COACH.length], seed: 'true' }),
+          12 + Math.floor(frng() * 30), ts(Math.floor(frng() * 3))]);
       }
     }
+    await bulkInsert(client, 'feed_events', ['user_id', 'type', 'payload', 'kudos', 'created_at'], feedRows);
 
-    // Rival boxes log today's Fran.
-    const rivalIds = {};
-    for (const [name, r] of Object.entries(RIVALS)) {
-      const rid = await getOrCreateBox(client, name, r.location);
-      rivalIds[name] = rid;
-      for (const a of r.loggers) {
-        const uid = await upsertUser(client, emailFor(a.name, name));
-        await upsertProfile(client, uid, { display_name: a.name, gym_name: name, exp: 'RX' });
-        await joinBox(client, uid, rid);
-        await upsertResult(client, uid, workoutId, a);
-      }
-      for (let i = 0; i < r.extra; i++) {
-        const nm = `${name.split(' ')[0]} Member ${i + 1}`;
-        const uid = await upsertUser(client, emailFor(nm, name));
-        await upsertProfile(client, uid, { display_name: nm, gym_name: name, exp: 'beginner' });
-        await joinBox(client, uid, rid);
-      }
-    }
-
-    // Active throwdown: Borderland vs CF South Texas on today's Fran.
-    const opponentId = rivalIds['CF South Texas'];
-    await client.query(
-      `DELETE FROM challenges WHERE challenger_box_id = $1 AND opponent_box_id = $2 AND workout_id = $3`,
-      [borderlandId, opponentId, workoutId]);
-    await client.query(
-      `INSERT INTO challenges (challenger_box_id, opponent_box_id, workout_id, starts_at, ends_at, status)
-         VALUES ($1, $2, $3, now() - interval '2 days', now() + interval '5 days', 'active')`,
-      [borderlandId, opponentId, workoutId]);
+    // Challenges: 2 completed (earlier June) + 1 active involving the home box.
+    const chRows = [
+      // completed powerhouse clash
+      [boxIds['Apex CrossFit'], boxIds['Iron Valley CrossFit'], workoutIds[13],
+        ts(15), ts(11), 'completed'],
+      // completed: home box vs a close rival
+      [boxIds[HOME_BOX], boxIds['CF South Texas'], workoutIds[24],
+        ts(26), ts(20), 'completed'],
+      // completed up-and-comer derby
+      [boxIds['Rising Tide CrossFit'], boxIds['Forge & Anvil CrossFit'], workoutIds[13],
+        ts(16), ts(10), 'completed'],
+      // ACTIVE: home box vs close rival on today's Fran
+      [boxIds[HOME_BOX], boxIds['Summit CrossFit'], franTodayId,
+        ts(3), `${dayStr(-4)} 12:00:00`, 'active'],
+    ];
+    await bulkInsert(client, 'challenges',
+      ['challenger_box_id', 'opponent_box_id', 'workout_id', 'starts_at', 'ends_at', 'status'], chRows);
 
     await client.query('COMMIT');
-
-    const totals = await pool.query(
-      `SELECT (SELECT COUNT(*) FROM boxes)::int AS boxes,
-              (SELECT COUNT(*) FROM box_memberships)::int AS members,
-              (SELECT COUNT(*) FROM results WHERE workout_id = $1)::int AS results,
-              (SELECT COUNT(*) FROM feed_events WHERE payload->>'seed' = 'true')::int AS feed`, [workoutId]);
-    const t = totals.rows[0];
-    console.log(`[seed] done — ${t.boxes} boxes, ${t.members} members, ${t.results} Fran results, ${t.feed} feed events.`);
-    console.log(`[seed] Athlete home box: "${HOME_BOX}". Owner box: "${OWNER_BOX}" (switch to Owner view in the header).`);
   } catch (e) {
     await client.query('ROLLBACK');
     throw e;
   } finally {
     client.release();
   }
+
+  const t = await pool.query(`
+    SELECT (SELECT COUNT(*) FROM boxes)::int AS boxes,
+           (SELECT COUNT(*) FROM box_memberships)::int AS athletes,
+           (SELECT COUNT(*) FROM results)::int AS results,
+           (SELECT COUNT(*) FROM workouts)::int AS workouts,
+           (SELECT COUNT(*) FROM challenges)::int AS challenges,
+           (SELECT COUNT(*) FROM feed_events)::int AS feed,
+           (SELECT COUNT(*) FROM user_badges)::int AS badges`);
+  const c = t.rows[0];
+  console.log(`[seed] world rebuilt — ${c.boxes} boxes, ${c.athletes} athletes, ${c.results} results, ` +
+    `${c.workouts} workouts, ${c.challenges} challenges, ${c.feed} feed events, ${c.badges} badge awards.`);
+  console.log(`[seed] Demo box (athlete home + owner): "${HOME_BOX}". Set your athlete gym to it, or switch to Owner view.`);
 }
 
 main()

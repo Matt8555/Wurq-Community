@@ -930,7 +930,11 @@ async function renderOwnerThrowdown() {
   } catch (e) { content.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
 
   const active = challenges.filter((c) => c.status === 'active');
-  const standings = await Promise.all(active.map((c) => api('GET', `/api/challenges/${c.id}/standing`).catch(() => null)));
+  const completed = challenges.filter((c) => c.status !== 'active');
+  const [activeStandings, completedStandings] = await Promise.all([
+    Promise.all(active.map((c) => api('GET', `/api/challenges/${c.id}/standing`).catch(() => null))),
+    Promise.all(completed.map((c) => api('GET', `/api/challenges/${c.id}/standing`).catch(() => null))),
+  ]);
 
   content.innerHTML = '';
   const wrap = el(`
@@ -938,6 +942,7 @@ async function renderOwnerThrowdown() {
       <h1 class="title">Throwdowns</h1>
       <p class="subtitle">Challenge another box — live head-to-head scoring</p>
       <div id="active"></div>
+      ${completed.length ? `<div class="sec-title">Recent throwdowns</div><div id="completed"></div>` : ''}
       <div class="sec-title">Start a throwdown</div>
       <div class="card">
         <label class="field"><span class="lbl">Rival box</span>
@@ -959,7 +964,10 @@ async function renderOwnerThrowdown() {
 
   const activeEl = wrap.querySelector('#active');
   if (!active.length) activeEl.appendChild(el(`<div class="empty">No active throwdowns yet. Start one below.</div>`));
-  standings.filter(Boolean).forEach((s) => activeEl.appendChild(throwdownCard(s)));
+  activeStandings.filter(Boolean).forEach((s) => activeEl.appendChild(throwdownCard(s)));
+
+  const completedEl = wrap.querySelector('#completed');
+  if (completedEl) completedStandings.filter(Boolean).forEach((s) => completedEl.appendChild(completedRow(s)));
 
   const err = wrap.querySelector('#err');
   const btn = wrap.querySelector('#send');
@@ -1009,6 +1017,22 @@ function throwdownCard(s) {
       <div class="vs-note">${winMine ? 'You\'re ahead' : 'You\'re behind'} — updates live as members log ${escapeHtml(ch.workout_name)}.</div>
     </div>
   `);
+}
+
+function completedRow(s) {
+  const ch = s.challenge;
+  const mineIsChallenger = ch.challenger_box_id === ownerBox.box_id;
+  const mine = mineIsChallenger ? s.challenger : s.opponent;
+  const them = mineIsChallenger ? s.opponent : s.challenger;
+  const won = mine.score >= them.score;
+  return el(`
+    <div class="list-row">
+      <div class="lr-main">
+        <div class="nm">${escapeHtml(ch.workout_name)} · vs ${escapeHtml(them.name)}</div>
+        <div class="meta">${mine.score} – ${them.score} · ${fmtDate(ch.ends_at)}</div>
+      </div>
+      <div class="${won ? 'pill-hot' : 'pill-warn'}">${won ? 'WON' : 'LOST'}</div>
+    </div>`);
 }
 
 async function renderOwnerEngage() {
