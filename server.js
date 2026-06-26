@@ -10,10 +10,12 @@ const { deriveMetrics } = require('./metrics');
 const { runSeed } = require('./seed');
 
 const BENCHMARKS = ['Fran', 'Helen', 'Grace', 'Cindy', 'Diane', 'Annie', 'Karen', 'Jackie', 'Isabel', 'Amanda', 'Elizabeth', 'Randy', 'Nancy'];
+const SEED_SENTINEL_BOX = 'CrossFit Borderland'; // presence = seeded world exists
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const publicDir = path.join(__dirname, 'public');
+let seeding = false; // true while the background seed is running
 
 // Avatars are stored as base64 data URIs in profiles.avatar_url (Postgres),
 // NOT on the local filesystem. This was chosen over a Railway volume because it
@@ -789,6 +791,36 @@ app.get('/api/athlete/:userId/profile', wrap(async (req, res) => {
   });
 }));
 
+// ---- API: health / diagnostics (read-only) ----------------------------------
+// Visit /api/health to see whether the demo world is seeded.
+app.get('/api/health', wrap(async (req, res) => {
+  let counts = {};
+  try {
+    const r = await pool.query(`
+      SELECT (SELECT COUNT(*) FROM boxes)::int AS boxes,
+             (SELECT COUNT(*) FROM box_memberships)::int AS athletes,
+             (SELECT COUNT(*) FROM results)::int AS results,
+             (SELECT COUNT(*) FROM feed_events)::int AS feed_events,
+             (SELECT COUNT(*) FROM challenges)::int AS challenges,
+             EXISTS (SELECT 1 FROM boxes WHERE name = $1) AS world_seeded`, [SEED_SENTINEL_BOX]);
+    counts = r.rows[0];
+  } catch (e) { counts = { error: e.message }; }
+  res.json({ ok: true, seeding, ...counts });
+}));
+
+// ---- API: manual reseed (guarded) -------------------------------------------
+// Disabled unless SEED_TOKEN is set; then POST /api/admin/reseed?token=... forces
+// a rebuild of the demo world (handy if auto-seed didn't run).
+app.post('/api/admin/reseed', wrap(async (req, res) => {
+  const token = process.env.SEED_TOKEN;
+  if (!token) return res.status(404).json({ error: 'Reseed endpoint disabled (set SEED_TOKEN to enable).' });
+  if (req.query.token !== token) return res.status(403).json({ error: 'Invalid token.' });
+  if (seeding) return res.status(202).json({ status: 'already seeding' });
+  seeding = true;
+  runSeed().then(() => { seeding = false; }).catch((e) => { seeding = false; console.error('[reseed] failed:', e); });
+  res.status(202).json({ status: 'reseeding started' });
+}));
+
 // ---- Static + SPA -----------------------------------------------------------
 app.use(express.static(publicDir));
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found.' }));
@@ -809,7 +841,6 @@ app.use((err, req, res, next) => {
 // boxes", so it still fires on a DB that only has a user-created box. Once the
 // world exists it won't reseed (live activity is preserved across restarts).
 // SEED_ON_BOOT=force rebuilds; SEED_ON_BOOT=never disables.
-const SEED_SENTINEL_BOX = 'CrossFit Borderland';
 async function maybeSeed() {
   const mode = process.env.SEED_ON_BOOT;
   if (mode === 'never') return;
@@ -819,13 +850,22 @@ async function maybeSeed() {
   } catch (_) { /* tables may not exist yet on a brand-new DB */ }
   if (mode === 'force' || !worldPresent) {
     console.log(`[startup] seeding demo world (${mode === 'force' ? 'forced' : 'seeded world not found'})…`);
-    try { await runSeed(); } catch (e) { console.error('[startup] seed failed (continuing):', e.message); }
+    seeding = true;
+    try { await runSeed(); console.log('[startup] seed complete'); }
+    catch (e) { console.error('[startup] seed failed (continuing):', e.message); }
+    finally { seeding = false; }
   }
 }
 
 migrate()
-  .then(maybeSeed)
-  .then(() => app.listen(PORT, () => console.log(`Wurq Community demo listening on port ${PORT}`)))
+  .then(() => {
+    // Start listening FIRST so the platform health check passes immediately,
+    // then seed in the background — a large seed must never delay (or fail) boot.
+    app.listen(PORT, () => {
+      console.log(`Wurq Community demo listening on port ${PORT}`);
+      maybeSeed().catch((e) => console.error('[startup] seed error (continuing):', e));
+    });
+  })
   .catch((err) => {
     console.error('[startup] migration failed:', err);
     process.exit(1);
