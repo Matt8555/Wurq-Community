@@ -2,49 +2,221 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Wurq Community</title>
   <style>
-    :root { color-scheme: light dark; }
+    :root {
+      --bg:        #0b0d0a;   /* near-black */
+      --surface:   rgba(255, 255, 255, 0.04);
+      --surface-2: rgba(255, 255, 255, 0.06);
+      --border:    rgba(255, 255, 255, 0.10);
+      --chalk:     #ecebe1;   /* chalk / off-white */
+      --muted:     #9a9c91;
+      --acid:      #c6ff00;   /* acid green */
+      --acid-dim:  rgba(198, 255, 0, 0.14);
+      --danger:    #ff6b6b;
+      --radius:    16px;
+    }
     * { box-sizing: border-box; }
+    html, body { height: 100%; }
     body {
       margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: radial-gradient(120% 80% at 50% -10%, #15180f 0%, var(--bg) 55%);
+      color: var(--chalk);
+      display: flex;
+      justify-content: center;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* Phone-sized frame */
+    .phone {
+      width: 100%;
+      max-width: 430px;
       min-height: 100vh;
       display: flex;
+      flex-direction: column;
+      position: relative;
+      padding: env(safe-area-inset-top) 0 0;
+    }
+
+    .topbar {
+      display: flex;
       align-items: center;
-      justify-content: center;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      background: radial-gradient(circle at top, #1e293b, #0f172a);
-      color: #f8fafc;
+      justify-content: space-between;
+      padding: 18px 20px 10px;
     }
+    .brand {
+      font-weight: 800;
+      letter-spacing: 0.18em;
+      font-size: 0.95rem;
+      text-transform: uppercase;
+    }
+    .brand .dot { color: var(--acid); }
+    .topbar .screen-name {
+      font-size: 0.72rem;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .content { flex: 1; padding: 8px 20px 96px; }
+
+    h1.title {
+      font-size: 1.6rem;
+      letter-spacing: -0.01em;
+      margin: 12px 0 4px;
+    }
+    p.subtitle { margin: 0 0 22px; color: var(--muted); font-size: 0.9rem; line-height: 1.45; }
+
     .card {
-      text-align: center;
-      padding: 3rem 2.5rem;
-      border-radius: 1rem;
-      background: rgba(255, 255, 255, 0.04);
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      max-width: 32rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      margin-bottom: 16px;
     }
-    h1 { margin: 0 0 0.5rem; font-size: 2.25rem; letter-spacing: -0.02em; }
-    p { margin: 0.25rem 0; color: #cbd5e1; line-height: 1.5; }
-    .badge {
+
+    /* Avatar */
+    .avatar-row { display: flex; align-items: center; gap: 16px; }
+    .avatar {
+      width: 84px; height: 84px; border-radius: 50%;
+      background: var(--surface-2);
+      border: 2px solid var(--border);
+      object-fit: cover;
+      display: flex; align-items: center; justify-content: center;
+      color: var(--muted); font-size: 1.7rem; font-weight: 700;
+      overflow: hidden; flex: none;
+    }
+    .avatar.has-img { border-color: var(--acid); }
+    .avatar-actions .upload-btn {
       display: inline-block;
-      margin-top: 1.5rem;
-      padding: 0.4rem 0.9rem;
-      border-radius: 999px;
-      font-size: 0.8rem;
-      background: #22c55e1a;
-      color: #4ade80;
-      border: 1px solid #22c55e33;
+      font-size: 0.8rem; font-weight: 600;
+      color: var(--acid);
+      border: 1px solid var(--acid);
+      background: transparent;
+      padding: 7px 14px; border-radius: 999px; cursor: pointer;
     }
+    .avatar-actions .hint { display: block; margin-top: 6px; font-size: 0.72rem; color: var(--muted); }
+    input[type="file"] { display: none; }
+
+    label.field { display: block; margin-top: 16px; }
+    label.field .lbl {
+      display: block;
+      font-size: 0.72rem; letter-spacing: 0.12em; text-transform: uppercase;
+      color: var(--muted); margin-bottom: 7px;
+    }
+    input[type="text"], input[type="email"], select, textarea {
+      width: 100%;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      color: var(--chalk);
+      padding: 13px 14px;
+      font-size: 0.95rem;
+      font-family: inherit;
+      outline: none;
+    }
+    textarea { resize: vertical; min-height: 72px; }
+    input:focus, select:focus, textarea:focus { border-color: var(--acid); }
+    select {
+      appearance: none;
+      background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%239a9c91' stroke-width='2'><path d='M6 9l6 6 6-6'/></svg>");
+      background-repeat: no-repeat;
+      background-position: right 14px center;
+    }
+
+    /* Prominent gym/box field */
+    .field-gym .lbl { color: var(--acid); }
+    .field-gym input {
+      border-color: var(--acid);
+      background: var(--acid-dim);
+      font-size: 1.05rem;
+      font-weight: 600;
+    }
+
+    /* Units toggle */
+    .toggle { display: inline-flex; background: var(--surface-2); border: 1px solid var(--border); border-radius: 999px; padding: 4px; }
+    .toggle button {
+      border: none; background: transparent; color: var(--muted);
+      padding: 8px 22px; border-radius: 999px; cursor: pointer;
+      font-size: 0.85rem; font-weight: 700; letter-spacing: 0.06em;
+    }
+    .toggle button.active { background: var(--acid); color: #10130a; }
+
+    .btn-primary {
+      width: 100%;
+      margin-top: 22px;
+      background: var(--acid);
+      color: #10130a;
+      border: none;
+      border-radius: 12px;
+      padding: 15px;
+      font-size: 1rem;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      cursor: pointer;
+    }
+    .btn-primary:disabled { opacity: 0.55; cursor: default; }
+
+    .link { background: none; border: none; color: var(--muted); font-size: 0.78rem; cursor: pointer; text-decoration: underline; padding: 0; }
+    .center { text-align: center; }
+
+    .error { color: var(--danger); font-size: 0.82rem; margin-top: 10px; min-height: 1em; }
+
+    /* Saved toast */
+    .toast {
+      position: fixed; left: 50%; bottom: 86px;
+      transform: translate(-50%, 20px);
+      background: var(--acid); color: #10130a;
+      font-weight: 700; font-size: 0.85rem;
+      padding: 11px 20px; border-radius: 999px;
+      opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s;
+      z-index: 20;
+    }
+    .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+    /* Bottom nav (phone) */
+    .nav {
+      position: fixed; bottom: 0; left: 50%; transform: translateX(-50%);
+      width: 100%; max-width: 430px;
+      display: flex; justify-content: space-around;
+      background: rgba(10, 12, 8, 0.92);
+      border-top: 1px solid var(--border);
+      padding: 10px 0 calc(10px + env(safe-area-inset-bottom));
+      backdrop-filter: blur(8px);
+    }
+    .nav a {
+      color: var(--muted); text-decoration: none; font-size: 0.68rem;
+      letter-spacing: 0.1em; text-transform: uppercase; text-align: center;
+    }
+    .nav a.active { color: var(--acid); }
+    .nav a .ico { display: block; font-size: 1.05rem; margin-bottom: 3px; }
+
+    .hidden { display: none !important; }
   </style>
 </head>
 <body>
-  <main class="card">
-    <h1>Wurq Community</h1>
-    <p>This is a deploy-ready static demo app.</p>
-    <p>Replace this <code>public/index.html</code> with your real content.</p>
-    <span class="badge">● Server is up</span>
-  </main>
+  <div class="phone">
+    <div class="topbar">
+      <div class="brand">WURQ<span class="dot">.</span></div>
+      <div class="screen-name">Profile</div>
+    </div>
+
+    <div class="content" id="content">
+      <!-- rendered by app.js -->
+      <p class="subtitle">Loading…</p>
+    </div>
+
+    <nav class="nav">
+      <a href="#"><span class="ico">▦</span>WOD</a>
+      <a href="#"><span class="ico">≡</span>Leaderboard</a>
+      <a href="#" class="active"><span class="ico">◉</span>Profile</a>
+    </nav>
+
+    <div class="toast" id="toast">Saved ✓</div>
+  </div>
+
+  <script src="/app.js"></script>
 </body>
 </html>
