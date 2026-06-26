@@ -394,6 +394,12 @@ async function main() {
   console.log(`[seed] Demo box (athlete home + owner): "${HOME_BOX}". Set your athlete gym to it, or switch to Owner view.`);
 }
 
-main()
-  .then(() => pool.end())
-  .catch((err) => { console.error('[seed] failed:', err); pool.end(); process.exit(1); });
+// Exported so the server can auto-seed an empty database on startup. (main()
+// shares the ./db pool and does NOT close it.) Run directly to seed manually.
+module.exports = { runSeed: main };
+
+if (require.main === module) {
+  main()
+    .then(() => pool.end())
+    .catch((err) => { console.error('[seed] failed:', err); pool.end(); process.exit(1); });
+}

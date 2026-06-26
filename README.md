@@ -131,7 +131,15 @@ profile, save, and reload — it persists.
 
 ## Demo seed data
 
-Run the seed to build a large, living demo world — a month of 10 gyms competing.
+**The app auto-seeds an empty database on startup.** On boot, if there are no
+boxes yet, it builds the full demo world automatically — so a fresh Railway
+deploy populates itself with no manual step. It will **not** reseed once data
+exists (so live activity is preserved across restarts).
+
+- `SEED_ON_BOOT=force` — rebuild the world on the next boot (resets demo data).
+- `SEED_ON_BOOT=never` — disable auto-seeding.
+
+You can also seed manually:
 
 ```bash
 DATABASE_URL="postgres://…" npm run seed

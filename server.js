@@ -7,6 +7,7 @@ const { pool, migrate } = require('./db');
 const { computeHolisticScore, computeBreakdown } = require('./holisticScore');
 const { evaluateBadges } = require('./badges');
 const { deriveMetrics } = require('./metrics');
+const { runSeed } = require('./seed');
 
 const BENCHMARKS = ['Fran', 'Helen', 'Grace', 'Cindy', 'Diane', 'Annie', 'Karen', 'Jackie', 'Isabel', 'Amanda', 'Elizabeth', 'Randy', 'Nancy'];
 
@@ -803,7 +804,23 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Internal server error.' });
 });
 
+// Auto-seed the demo world. By default seeds only when the DB is empty (no
+// boxes), so a fresh deploy populates itself without wiping live data on every
+// restart. Set SEED_ON_BOOT=force to rebuild the world, or =never to disable.
+async function maybeSeed() {
+  const mode = process.env.SEED_ON_BOOT;
+  if (mode === 'never') return;
+  let empty = true;
+  try { empty = (await pool.query('SELECT COUNT(*)::int AS n FROM boxes')).rows[0].n === 0; }
+  catch (_) { /* table may not exist yet on a brand-new DB */ }
+  if (mode === 'force' || empty) {
+    console.log(`[startup] seeding demo world (${mode === 'force' ? 'forced' : 'database is empty'})…`);
+    try { await runSeed(); } catch (e) { console.error('[startup] seed failed (continuing):', e.message); }
+  }
+}
+
 migrate()
+  .then(maybeSeed)
   .then(() => app.listen(PORT, () => console.log(`Wurq Community demo listening on port ${PORT}`)))
   .catch((err) => {
     console.error('[startup] migration failed:', err);
