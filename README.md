@@ -40,7 +40,7 @@ one file so they are easy to tune.
 | POST | `/api/users` | Create or match a user by `email`; returns `user_id`. |
 | GET | `/api/profile/:userId` | Fetch a profile. |
 | PUT | `/api/profile/:userId` | Create/update profile fields. |
-| POST | `/api/profile/:userId/avatar` | Upload an avatar image (`avatar` field); returns its URL. |
+| POST | `/api/profile/:userId/avatar` | Upload an avatar image (`avatar` field); stored as a base64 data URI in Postgres and returned. |
 | GET | `/api/wod/today` | Today's WOD (seeds "Fran" if none exists for today). |
 | POST | `/api/results` | Submit raw inputs (`userId`, `workoutId`, `time_seconds`, `rom_pct`, `unbroken_sets`); server computes the Holistic Score, upserts, writes a `result_logged` feed event, evaluates badges. Returns the saved result + any newly earned badges. |
 | GET | `/api/leaderboard/box/:boxId/:workoutId` | In-box leaderboard, joined to `display_name` + `avatar_url`, ranked by Holistic Score. |
@@ -48,11 +48,11 @@ one file so they are easy to tune.
 | GET | `/api/feed/box/:boxId` | Recent feed events for a box's members, newest first. |
 | POST | `/api/feed/:eventId/kudos` | Increment the kudos count on a feed event. |
 
-Avatars are saved to a local `uploads/` folder and served statically.
-**⚠️ Profile photo storage still needs a persistent volume (separate task):**
-on Railway the container filesystem is ephemeral, so uploaded avatars won't
-survive a redeploy until storage is moved to a mounted Railway volume or object
-storage (S3).
+**Profile photos persist in Postgres.** Uploaded avatars are stored as base64
+data URIs in `profiles.avatar_url` (capped at 2 MB), not on the local
+filesystem. This was chosen over a Railway volume because it needs zero infra
+config and survives redeploys (the container disk is ephemeral). A future scale
+step can move these to object storage / a CDN.
 
 **Auth is intentionally out of scope for now** — the app runs open/no-login.
 Anyone with a `user_id` (cached in the browser) can act as that athlete. Real
@@ -79,6 +79,27 @@ npm start
 The server binds to `process.env.PORT || 3000`. Open
 [http://localhost:3000](http://localhost:3000), enter an email, fill in your
 profile, save, and reload — it persists.
+
+## Demo seed data
+
+To make every screen look alive, run the idempotent seed script. It creates 4
+boxes, ~30 members (20 with logged Fran results), varied box-vs-box standings,
+and a populated feed. Re-running it does **not** duplicate anything.
+
+```bash
+DATABASE_URL="postgres://…" npm run seed
+```
+
+Then set your profile's gym/box to **CrossFit Pegacorn** (the demo home box) to
+drop into the already-populated box. The Community/Circle tab's posts are a
+front-end mock and always render, so they aren't part of the seed.
+
+## Branding
+
+The header uses the **WurQ** wordmark (capital W and Q, the Q in acid-green) on
+the existing dark / chalk / acid-green athletic palette. Note: wurq.io was not
+reachable from the build environment to extract exact logo assets / hex values —
+share the brand palette or logo SVG to make the match pixel-perfect.
 
 ## Deploy to Railway
 

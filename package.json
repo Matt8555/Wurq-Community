@@ -4,7 +4,8 @@
   "description": "Deploy-ready static demo app for Wurq Community with persisted user profiles",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "seed": "node seed.js"
   },
   "engines": {
     "node": ">=18"

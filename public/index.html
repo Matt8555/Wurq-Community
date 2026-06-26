@@ -2,8 +2,10 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-  <title>Wurq Community</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
+  <meta name="theme-color" content="#0b0d0a" />
+  <title>WurQ Community</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0d0a'/%3E%3Ctext x='16' y='23' font-family='Helvetica,Arial,sans-serif' font-size='20' font-weight='bold' fill='%23c6ff00' text-anchor='middle'%3EQ%3C/text%3E%3C/svg%3E" />
   <style>
     :root {
       --bg:        #0b0d0a;   /* near-black */
@@ -46,13 +48,13 @@
       justify-content: space-between;
       padding: 18px 20px 10px;
     }
+    /* WurQ wordmark (brand casing: lowercase "ur", capital W and Q; Q in acid). */
     .brand {
       font-weight: 800;
-      letter-spacing: 0.18em;
-      font-size: 0.95rem;
-      text-transform: uppercase;
+      letter-spacing: -0.01em;
+      font-size: 1.3rem;
     }
-    .brand .dot { color: var(--acid); }
+    .brand .q { color: var(--acid); }
     .topbar .screen-name {
       font-size: 0.72rem;
       letter-spacing: 0.16em;
@@ -189,7 +191,7 @@
     .nav a {
       color: var(--muted); text-decoration: none; font-size: 0.6rem;
       letter-spacing: 0.04em; text-transform: uppercase; text-align: center;
-      flex: 1;
+      flex: 1; padding: 6px 2px; /* ~47px tap target (iOS 44px guideline) */
     }
     .nav a.active { color: var(--acid); }
     .nav a .ico { display: block; font-size: 1.05rem; margin-bottom: 3px; }
@@ -272,6 +274,12 @@
     .feed-text b { font-weight: 700; }
     .feed-text .accent { color: var(--acid); font-weight: 700; }
     .feed-badge { color: var(--acid); }
+    .feed-text .role-tag {
+      font-size: 0.58rem; letter-spacing: 0.08em; text-transform: uppercase;
+      color: var(--acid); border: 1px solid var(--acid); border-radius: 999px;
+      padding: 1px 6px; margin-left: 4px;
+    }
+    .feed-post { margin-top: 5px; color: var(--chalk); opacity: 0.92; font-size: 0.88rem; line-height: 1.45; }
     .feed-meta { display: flex; align-items: center; gap: 14px; margin-top: 8px; }
     .feed-time { color: var(--muted); font-size: 0.72rem; }
     .kudos {
@@ -367,7 +375,7 @@
 <body>
   <div class="phone">
     <div class="topbar">
-      <div class="brand">WURQ<span class="dot">.</span></div>
+      <div class="brand">Wur<span class="q">Q</span></div>
       <div class="screen-name">Profile</div>
     </div>
 

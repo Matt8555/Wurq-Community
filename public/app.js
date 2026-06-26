@@ -520,6 +520,9 @@ function feedText(ev) {
   if (ev.type === 'badge_earned') {
     return `${name} earned the <span class="accent">${escapeHtml(p.name || 'a')}</span> badge <span class="feed-badge">🏅</span>`;
   }
+  if (ev.type === 'coach_post') {
+    return `${name} <span class="role-tag">Coach</span><div class="feed-post">${escapeHtml(p.text || '')}</div>`;
+  }
   return `${name} did something`;
 }
 

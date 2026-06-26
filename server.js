@@ -2,7 +2,6 @@
 
 const express = require('express');
 const path = require('path');
-const fs = require('fs');
 const multer = require('multer');
 const { pool, migrate } = require('./db');
 const { computeHolisticScore } = require('./holisticScore');
@@ -11,29 +10,19 @@ const { evaluateBadges } = require('./badges');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const publicDir = path.join(__dirname, 'public');
-const uploadsDir = path.join(__dirname, 'uploads');
 
-// Ensure the uploads folder exists. NOTE: local disk is fine for the demo, but on
-// Railway the container filesystem is ephemeral — uploaded avatars will not
-// survive a redeploy. For production move this to object storage (S3) or a
-// mounted Railway volume and store the resulting URL in profiles.avatar_url.
-fs.mkdirSync(uploadsDir, { recursive: true });
+// Avatars are stored as base64 data URIs in profiles.avatar_url (Postgres),
+// NOT on the local filesystem. This was chosen over a Railway volume because it
+// needs zero infra config and survives redeploys (the container disk is
+// ephemeral). Images are capped small (2 MB) to keep rows reasonable; a future
+// scale step can move these to object storage / a CDN.
+app.use(express.json({ limit: '4mb' }));
 
-app.use(express.json({ limit: '1mb' }));
-
-// ---- Avatar upload (multipart) ----------------------------------------------
+// ---- Avatar upload (multipart, kept in memory -> base64) --------------------
 const ALLOWED_IMAGE = /^image\/(png|jpe?g|gif|webp)$/;
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadsDir),
-  filename: (req, file, cb) => {
-    const ext = (path.extname(file.originalname) || '').toLowerCase().slice(0, 10);
-    const safe = (req.params.userId || 'user').replace(/[^a-z0-9-]/gi, '');
-    cb(null, `${safe}-${process.hrtime.bigint().toString(36)}${ext || '.img'}`);
-  },
-});
 const upload = multer({
-  storage,
-  limits: { fileSize: 5 * 1024 * 1024 },
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 2 * 1024 * 1024 }, // 2 MB
   fileFilter: (req, file, cb) => {
     if (ALLOWED_IMAGE.test(file.mimetype)) return cb(null, true);
     cb(new Error('Only image uploads are allowed (png, jpg, gif, webp).'));
@@ -206,7 +195,8 @@ app.post('/api/profile/:userId/avatar', wrap(async (req, res) => {
   });
   if (!req.file) return res.status(400).json({ error: 'No image file received (field name: "avatar").' });
 
-  const avatar_url = `/uploads/${req.file.filename}`;
+  // Store the image inline as a base64 data URI so it persists in Postgres.
+  const avatar_url = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
   await pool.query(
     `INSERT INTO profiles (user_id, avatar_url, updated_at)
        VALUES ($1, $2, now())
@@ -404,7 +394,6 @@ app.post('/api/feed/:eventId/kudos', wrap(async (req, res) => {
 }));
 
 // ---- Static + SPA -----------------------------------------------------------
-app.use('/uploads', express.static(uploadsDir));
 app.use(express.static(publicDir));
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found.' }));
 app.get('*', (req, res) => res.sendFile(path.join(publicDir, 'index.html')));
