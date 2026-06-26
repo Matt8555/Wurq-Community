@@ -374,6 +374,7 @@ async function main() {
     await client.query('BEGIN');
 
     // Reset the world (deterministic rebuild). FK-safe order.
+    await client.query('DELETE FROM box_roles');
     await client.query('DELETE FROM follows');
     await client.query('DELETE FROM referrals');
     await client.query('DELETE FROM feed_events');
@@ -532,6 +533,36 @@ async function main() {
         `INSERT INTO squad_members (squad_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [sid, a.userId]);
     }
 
+    // ---- Roles: an owner + 2 coaches per box. Demo box: matt owner+coach, alex coach.
+    const coachesByBox = {};
+    for (const box of BOX_DEFS) {
+      const boxId = boxIds[box.name];
+      const roster = athletes.filter((a) => a.boxName === box.name);
+      const owner = roster[0];
+      const roleRows = [];
+      if (owner) { roleRows.push([owner.userId, boxId, 'owner'], [owner.userId, boxId, 'coach']); }
+      const coachPool = roster.slice(1).sort(() => frng() - 0.5).slice(0, 2);
+      for (const c of coachPool) roleRows.push([c.userId, boxId, 'coach']);
+      coachesByBox[box.name] = [owner, ...coachPool].filter(Boolean);
+      await bulkInsert(client, 'box_roles', ['user_id', 'box_id', 'role'], roleRows,
+        'ON CONFLICT (user_id, box_id, role) DO NOTHING');
+    }
+    const matt = athletes.find((a) => a.email === DEMO_ATHLETES[0].email);
+    const alex = athletes.find((a) => a.email === DEMO_ATHLETES[1].email);
+    const borderId = boxIds[HOME_BOX];
+    for (const [u, roles] of [[matt, ['owner', 'coach']], [alex, ['coach']]]) {
+      if (!u) continue;
+      for (const r of roles) await client.query(
+        'INSERT INTO box_roles (user_id, box_id, role) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', [u.userId, borderId, r]);
+      if (!coachesByBox[HOME_BOX].includes(u)) coachesByBox[HOME_BOX].push(u);
+    }
+
+    // Coach-programmed WOD: today's Fran is programmed by Coach Matt P.
+    if (matt) await client.query(
+      `UPDATE workouts SET programmed_by = $1, type = 'For Time',
+         scaling = 'Scale pull-ups to bands or ring rows; 65/45 lb thrusters if needed.'
+        WHERE name = 'Fran' AND wod_date = CURRENT_DATE`, [matt.userId]);
+
     // Team goal per box — mostly complete so it looks exciting. current is
     // computed live by the API; here we set a target just above the real count.
     const GOAL_TYPES = ['total_workouts', 'total_holistic_points', 'participation_days'];
@@ -573,9 +604,31 @@ async function main() {
     }
     await bulkInsert(client, 'feed_events', ['user_id', 'type', 'payload', 'kudos', 'created_at'], shoutRows);
 
-    // Newcomers — "new this week" members (recent join, no results yet).
+    // Coach announcements — box messages from a coach (elevated in the feed).
+    const ANNOUNCE = [
+      'Saturday throwdown — bring a partner! 💪',
+      'Great week, team. Mobility class Friday at 6pm.',
+      'New strength cycle starts Monday — let\'s build that engine.',
+    ];
+    const annRows = [];
+    for (const box of BOX_DEFS) {
+      const coach = (coachesByBox[box.name] || [])[0];
+      if (!coach) continue;
+      annRows.push([coach.userId, 'announcement',
+        JSON.stringify({ text: ANNOUNCE[BOX_DEFS.indexOf(box) % ANNOUNCE.length], seed: 'true' }),
+        5 + Math.floor(frng() * 20), ts(Math.floor(frng() * 3))]);
+    }
+    await bulkInsert(client, 'feed_events', ['user_id', 'type', 'payload', 'kudos', 'created_at'], annRows);
+
+    // Newcomers — "new this week" members (recent join, no results yet), placed
+    // into an auto-cohort "New Crew" squad so they're never alone.
     for (const box of BOX_DEFS) {
       const boxId = boxIds[box.name];
+      const shortName = box.name.replace(/^(CrossFit|CF)\s+/i, '').replace(/\s+CrossFit$/i, '').trim() || box.name;
+      const cohort = await client.query(
+        `INSERT INTO squads (box_id, name, created_at) VALUES ($1, $2, now()) RETURNING id`,
+        [boxId, `${shortName} — New Crew`]);
+      const cohortId = cohort.rows[0].id;
       for (let i = 0; i < 2; i++) {
         const name = `${FIRST[(i * 9 + BOX_DEFS.indexOf(box) * 3) % FIRST.length]} ${LAST[(i * 7 + 2) % LAST.length]}`;
         const uid = await upsertUser(client, `new${i}.${slug(box.name)}@wurqdemo.io`);
@@ -585,6 +638,8 @@ async function main() {
              VALUES ($1, $2, now() - ($3 || ' days')::interval)
              ON CONFLICT (user_id, box_id) DO UPDATE SET joined_at = EXCLUDED.joined_at`,
           [uid, boxId, String(1 + i)]);
+        await client.query(
+          `INSERT INTO squad_members (squad_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [cohortId, uid]);
       }
     }
 

@@ -52,8 +52,13 @@ async function getProfileRow(userId) {
             p.experience_level, p.primary_goals,
             COALESCE(p.units, 'lb')             AS units,
             COALESCE(p.profile_complete, false) AS profile_complete,
+            COALESCE(p.referral_points, 0) AS referral_points,
             p.updated_at,
-            b.box_id, b.name AS box_name
+            b.box_id, b.name AS box_name,
+            EXISTS (SELECT 1 FROM box_roles br WHERE br.user_id = u.user_id AND br.box_id = b.box_id AND br.role IN ('coach','owner')) AS is_coach,
+            EXISTS (SELECT 1 FROM box_roles br WHERE br.user_id = u.user_id AND br.box_id = b.box_id AND br.role = 'owner') AS is_owner,
+            ((SELECT COUNT(*) FROM squad_members sm WHERE sm.user_id = u.user_id)
+              + (SELECT COUNT(*) FROM follows f WHERE f.follower_user_id = u.user_id))::int AS connection_count
        FROM users u
        LEFT JOIN profiles p ON p.user_id = u.user_id
        LEFT JOIN LATERAL (
@@ -69,6 +74,14 @@ async function getProfileRow(userId) {
   );
   return rows[0] || null;
 }
+
+// ---- Role helpers / gating --------------------------------------------------
+async function rolesFor(userId, boxId) {
+  if (!isUuid(userId) || !isUuid(boxId)) return [];
+  const { rows } = await pool.query('SELECT role FROM box_roles WHERE user_id = $1 AND box_id = $2', [userId, boxId]);
+  return rows.map((r) => r.role);
+}
+const hasCoach = (roles) => roles.includes('coach') || roles.includes('owner');
 
 // ---- API: users -------------------------------------------------------------
 app.post('/api/users', wrap(async (req, res) => {
@@ -254,9 +267,11 @@ app.get('/api/wod/today', wrap(async (req, res) => {
        WHERE NOT EXISTS (SELECT 1 FROM workouts WHERE name = 'Fran' AND wod_date = CURRENT_DATE)`
   );
   const { rows } = await pool.query(
-    `SELECT workout_id, name, type, description, wod_date
-       FROM workouts
-      ORDER BY (wod_date = CURRENT_DATE) DESC, wod_date DESC
+    `SELECT w.workout_id, w.name, w.type, w.description, w.scaling, w.wod_date,
+            w.programmed_by, COALESCE(NULLIF(p.display_name,''), NULL) AS programmed_by_name
+       FROM workouts w
+       LEFT JOIN profiles p ON p.user_id = w.programmed_by
+      ORDER BY (w.wod_date = CURRENT_DATE) DESC, w.wod_date DESC
       LIMIT 1`
   );
   res.json(rows[0]);
@@ -402,7 +417,8 @@ app.get('/api/leaderboard/box/:boxId/:workoutId', wrap(async (req, res) => {
     `SELECT r.user_id,
             COALESCE(NULLIF(p.display_name, ''), 'Athlete') AS display_name,
             p.avatar_url,
-            r.time_seconds, r.rom_pct, r.unbroken_sets, r.holistic_score, r.created_at
+            r.time_seconds, r.rom_pct, r.unbroken_sets, r.holistic_score, r.created_at,
+            EXISTS (SELECT 1 FROM box_roles br WHERE br.user_id = r.user_id AND br.box_id = $1 AND br.role IN ('coach','owner')) AS is_coach
        FROM box_memberships m
        JOIN results r ON r.user_id = m.user_id AND r.workout_id = $2
        LEFT JOIN profiles p ON p.user_id = r.user_id
@@ -479,7 +495,8 @@ app.get('/api/feed/box/:boxId', wrap(async (req, res) => {
   const { rows } = await pool.query(
     `SELECT f.event_id, f.user_id, f.type, f.ref_id, f.payload, f.kudos, f.created_at,
             COALESCE(NULLIF(p.display_name, ''), 'Athlete') AS display_name,
-            p.avatar_url
+            p.avatar_url,
+            EXISTS (SELECT 1 FROM box_roles br WHERE br.user_id = f.user_id AND br.box_id = $1 AND br.role IN ('coach','owner')) AS is_coach
        FROM feed_events f
        JOIN box_memberships m ON m.user_id = f.user_id
        LEFT JOIN profiles p ON p.user_id = f.user_id
@@ -832,7 +849,7 @@ app.get('/api/athlete/:userId/profile', wrap(async (req, res) => {
   }
 
   res.json({
-    user: { display_name: prof.display_name, gym_name: prof.gym_name, experience_level: prof.experience_level, avatar_url: prof.avatar_url, box_id: prof.box_id },
+    user: { display_name: prof.display_name, gym_name: prof.gym_name, experience_level: prof.experience_level, avatar_url: prof.avatar_url, box_id: prof.box_id, is_coach: prof.is_coach, connection_count: prof.connection_count },
     summary: { sessions_total: R.length, current_streak, trained_today, longest_streak: longest, this_week_avg, last_week_avg },
     prs: { best_holistic: bestH, fastest, highest_power: bestP, longest_streak: longest },
     heatmap, trend, workload, comparison, benchmarks,
@@ -979,7 +996,8 @@ app.get('/api/squads/:squadId/feed', wrap(async (req, res) => {
   if (!sq.rows[0]) return res.status(404).json({ error: 'Squad not found.' });
   const { rows } = await pool.query(
     `SELECT f.event_id, f.user_id, f.type, f.ref_id, f.payload, f.kudos, f.created_at,
-            COALESCE(NULLIF(p.display_name,''),'Athlete') AS display_name, p.avatar_url
+            COALESCE(NULLIF(p.display_name,''),'Athlete') AS display_name, p.avatar_url,
+            EXISTS (SELECT 1 FROM box_roles br WHERE br.user_id = f.user_id AND br.role IN ('coach','owner')) AS is_coach
        FROM feed_events f JOIN squad_members sm ON sm.user_id = f.user_id
        LEFT JOIN profiles p ON p.user_id = f.user_id
       WHERE sm.squad_id = $1 ORDER BY f.created_at DESC LIMIT 50`, [squadId]);
@@ -1086,7 +1104,8 @@ app.get('/api/box/:boxId/referral-leaderboard', wrap(async (req, res) => {
 app.get('/api/global/feed', wrap(async (req, res) => {
   const { rows } = await pool.query(
     `SELECT f.event_id, f.user_id, f.type, f.payload, f.kudos, f.created_at,
-            COALESCE(NULLIF(p.display_name,''),'Athlete') AS display_name, b.name AS box_name
+            COALESCE(NULLIF(p.display_name,''),'Athlete') AS display_name, b.name AS box_name,
+            EXISTS (SELECT 1 FROM box_roles br WHERE br.user_id = f.user_id AND br.role IN ('coach','owner')) AS is_coach
        FROM feed_events f
        LEFT JOIN profiles p ON p.user_id = f.user_id
        LEFT JOIN box_memberships m ON m.user_id = f.user_id
@@ -1175,6 +1194,162 @@ app.get('/api/users/:userId/following-feed', wrap(async (req, res) => {
        LEFT JOIN boxes b ON b.box_id = m.box_id
       ORDER BY f.created_at DESC LIMIT 50`, [userId]);
   res.json({ events: rows });
+}));
+
+// ---- API: roles & coach management ------------------------------------------
+app.get('/api/box/:boxId/manage-coaches', wrap(async (req, res) => {
+  const { boxId } = req.params;
+  if (!isUuid(boxId)) return res.status(400).json({ error: 'Invalid box id.' });
+  const { rows } = await pool.query(
+    `SELECT m.user_id, COALESCE(NULLIF(p.display_name,''),'Athlete') AS display_name,
+            EXISTS (SELECT 1 FROM box_roles br WHERE br.user_id = m.user_id AND br.box_id = $1 AND br.role = 'coach') AS is_coach,
+            EXISTS (SELECT 1 FROM box_roles br WHERE br.user_id = m.user_id AND br.box_id = $1 AND br.role = 'owner') AS is_owner
+       FROM box_memberships m LEFT JOIN profiles p ON p.user_id = m.user_id
+      WHERE m.box_id = $1 ORDER BY is_coach DESC, display_name LIMIT 300`, [boxId]);
+  res.json({ members: rows });
+}));
+
+app.post('/api/box/:boxId/coaches', wrap(async (req, res) => {
+  const { boxId } = req.params;
+  const b = req.body || {};
+  const actingUserId = b.actingUserId || b.acting_user_id;
+  const targetUserId = b.targetUserId || b.target_user_id;
+  const action = b.action === 'demote' ? 'demote' : 'promote';
+  if (!isUuid(boxId) || !isUuid(targetUserId)) return res.status(400).json({ error: 'Invalid id.' });
+  if (!(await rolesFor(actingUserId, boxId)).includes('owner')) return res.status(403).json({ error: 'Only the box owner can manage coaches.' });
+  if (action === 'demote') {
+    await pool.query(`DELETE FROM box_roles WHERE user_id = $1 AND box_id = $2 AND role = 'coach'`, [targetUserId, boxId]);
+    return res.json({ ok: true, is_coach: false });
+  }
+  await pool.query(
+    `INSERT INTO box_roles (user_id, box_id, role) VALUES ($1, $2, 'coach') ON CONFLICT DO NOTHING`, [targetUserId, boxId]);
+  res.json({ ok: true, is_coach: true });
+}));
+
+// ---- API: coach — program the WOD -------------------------------------------
+app.post('/api/box/:boxId/wod', wrap(async (req, res) => {
+  const { boxId } = req.params;
+  const b = req.body || {};
+  const actingUserId = b.actingUserId || b.acting_user_id;
+  if (!isUuid(boxId)) return res.status(400).json({ error: 'Invalid box id.' });
+  if (!hasCoach(await rolesFor(actingUserId, boxId))) return res.status(403).json({ error: 'Coaches only.' });
+  const name = typeof b.name === 'string' ? b.name.trim() : '';
+  if (!name || name.length > 60) return res.status(400).json({ error: 'A WOD name (1–60 chars) is required.' });
+  const type = (typeof b.type === 'string' ? b.type.trim() : '') || 'For Time';
+  const description = (typeof b.description === 'string' ? b.description.trim() : '').slice(0, 1000);
+  const scaling = (typeof b.scaling === 'string' ? b.scaling.trim() : '').slice(0, 500);
+  // Program today's WOD (the shared today workout), tagged with the coach.
+  const existing = await pool.query(`SELECT workout_id FROM workouts WHERE wod_date = CURRENT_DATE ORDER BY workout_id LIMIT 1`);
+  let row;
+  if (existing.rows[0]) {
+    row = (await pool.query(
+      `UPDATE workouts SET name = $1, type = $2, description = $3, scaling = $4, programmed_by = $5
+         WHERE workout_id = $6 RETURNING workout_id, name, type, description, scaling, wod_date, programmed_by`,
+      [name, type, description, scaling, actingUserId, existing.rows[0].workout_id])).rows[0];
+  } else {
+    row = (await pool.query(
+      `INSERT INTO workouts (name, type, description, scaling, programmed_by, wod_date)
+         VALUES ($1, $2, $3, $4, $5, CURRENT_DATE) RETURNING workout_id, name, type, description, scaling, wod_date, programmed_by`,
+      [name, type, description, scaling, actingUserId])).rows[0];
+  }
+  res.status(201).json(row);
+}));
+
+// ---- API: coach — athlete roster --------------------------------------------
+app.get('/api/box/:boxId/roster', wrap(async (req, res) => {
+  const { boxId } = req.params;
+  if (!isUuid(boxId)) return res.status(400).json({ error: 'Invalid box id.' });
+  const actingUserId = isUuid(req.query.userId) ? req.query.userId : null;
+  if (!hasCoach(await rolesFor(actingUserId, boxId))) return res.status(403).json({ error: 'Coaches only.' });
+  const { rows } = await pool.query(
+    `SELECT m.user_id,
+            COALESCE(NULLIF(p.display_name,''),'Athlete') AS display_name,
+            COALESCE(p.experience_level,'') AS experience_level,
+            EXISTS (SELECT 1 FROM box_roles br WHERE br.user_id = m.user_id AND br.box_id = $1 AND br.role IN ('coach','owner')) AS is_coach,
+            COUNT(r.result_id)::int AS sessions,
+            MAX(r.created_at) AS last_logged,
+            (CURRENT_DATE - MAX(r.created_at)::date) AS days_since,
+            BOOL_OR(r.created_at::date = CURRENT_DATE) AS logged_today,
+            ROUND(AVG(r.holistic_score) FILTER (WHERE r.created_at >= now() - interval '7 days'), 1) AS week_avg,
+            ROUND(AVG(r.holistic_score) FILTER (WHERE r.created_at >= now() - interval '14 days' AND r.created_at < now() - interval '7 days'), 1) AS prev_avg,
+            ((SELECT COUNT(*) FROM squad_members sm WHERE sm.user_id = m.user_id)
+              + (SELECT COUNT(*) FROM follows f WHERE f.follower_user_id = m.user_id))::int AS connection_count
+       FROM box_memberships m
+       LEFT JOIN profiles p ON p.user_id = m.user_id
+       LEFT JOIN results r ON r.user_id = m.user_id
+      WHERE m.box_id = $1
+      GROUP BY m.user_id, p.display_name, p.experience_level
+      ORDER BY logged_today DESC NULLS LAST, days_since ASC NULLS LAST`, [boxId]);
+  const members = rows.map((m) => ({
+    user_id: m.user_id, display_name: m.display_name, experience_level: m.experience_level,
+    is_coach: m.is_coach, sessions: m.sessions, logged_today: !!m.logged_today,
+    days_since: m.days_since == null ? null : Number(m.days_since),
+    week_avg: m.week_avg == null ? null : Number(m.week_avg),
+    prev_avg: m.prev_avg == null ? null : Number(m.prev_avg),
+    connection_count: m.connection_count,
+    quiet: m.days_since == null || Number(m.days_since) >= 10,
+    under_connected: m.connection_count < 3,
+  }));
+  res.json({
+    members,
+    logged_today: members.filter((m) => m.logged_today).length,
+    total: members.length,
+    quiet_count: members.filter((m) => m.quiet).length,
+  });
+}));
+
+// ---- API: coach — announce to the box ---------------------------------------
+app.post('/api/box/:boxId/announce', wrap(async (req, res) => {
+  const { boxId } = req.params;
+  const b = req.body || {};
+  const actingUserId = b.actingUserId || b.acting_user_id;
+  const text = typeof b.text === 'string' ? b.text.trim() : '';
+  if (!isUuid(boxId)) return res.status(400).json({ error: 'Invalid box id.' });
+  if (!hasCoach(await rolesFor(actingUserId, boxId))) return res.status(403).json({ error: 'Coaches only.' });
+  if (!text || text.length > 500) return res.status(400).json({ error: 'Announcement text (1–500 chars) is required.' });
+  const { rows } = await pool.query(
+    `INSERT INTO feed_events (user_id, type, payload) VALUES ($1, 'announcement', $2) RETURNING event_id, created_at`,
+    [actingUserId, JSON.stringify({ text })]);
+  res.status(201).json({ ok: true, event_id: rows[0].event_id });
+}));
+
+// ---- API: connection-driven onboarding --------------------------------------
+app.get('/api/users/:userId/onboarding', wrap(async (req, res) => {
+  const { userId } = req.params;
+  if (!isUuid(userId)) return res.status(400).json({ error: 'Invalid user id.' });
+  const prof = await getProfileRow(userId);
+  if (!prof) return res.status(404).json({ error: 'User not found.' });
+  if (!prof.box_id) return res.json({ box: null });
+  const boxId = prof.box_id;
+
+  // Ensure a "New Crew" cohort squad exists and the user is in it.
+  const shortName = prof.box_name.replace(/^(CrossFit|CF)\s+/i, '').replace(/\s+CrossFit$/i, '').trim() || prof.box_name;
+  const cohortName = `${shortName} — New Crew`;
+  let cohort = (await pool.query('SELECT id, name FROM squads WHERE box_id = $1 AND name = $2 LIMIT 1', [boxId, cohortName])).rows[0];
+  if (!cohort) cohort = (await pool.query('INSERT INTO squads (box_id, name) VALUES ($1, $2) RETURNING id, name', [boxId, cohortName])).rows[0];
+  await pool.query('INSERT INTO squad_members (squad_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [cohort.id, userId]);
+  const cohortCount = (await pool.query('SELECT COUNT(*)::int AS n FROM squad_members WHERE squad_id = $1', [cohort.id])).rows[0].n;
+
+  const coaches = (await pool.query(
+    `SELECT DISTINCT br.user_id, COALESCE(NULLIF(p.display_name,''),'Coach') AS display_name
+       FROM box_roles br LEFT JOIN profiles p ON p.user_id = br.user_id
+      WHERE br.box_id = $1 AND br.role = 'coach' AND br.user_id <> $2 LIMIT 4`, [boxId, userId])).rows;
+  // Suggested boxmates to follow (active, not already followed, not self).
+  const suggestions = (await pool.query(
+    `SELECT m.user_id, COALESCE(NULLIF(p.display_name,''),'Athlete') AS display_name,
+            EXISTS (SELECT 1 FROM box_roles br WHERE br.user_id = m.user_id AND br.box_id = $1 AND br.role IN ('coach','owner')) AS is_coach
+       FROM box_memberships m LEFT JOIN profiles p ON p.user_id = m.user_id
+      WHERE m.box_id = $1 AND m.user_id <> $2
+        AND NOT EXISTS (SELECT 1 FROM follows f WHERE f.follower_user_id = $2 AND f.followee_user_id = m.user_id)
+        AND EXISTS (SELECT 1 FROM results r WHERE r.user_id = m.user_id)
+      ORDER BY random() LIMIT 5`, [boxId, userId])).rows;
+
+  res.json({
+    box: { box_id: boxId, name: prof.box_name },
+    cohort: { squad_id: cohort.id, name: cohort.name, member_count: cohortCount },
+    coaches, suggestions,
+    connection_count: prof.connection_count,
+  });
 }));
 
 // ---- API: owner affiliate status --------------------------------------------

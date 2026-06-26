@@ -12,7 +12,8 @@ Postgres.
 
 `user_id` (UUID) is the real, immutable key; `email` is the human match key.
 Tables: `users`, `profiles`, `identities`, `boxes`, `box_memberships`,
-`workouts`, `results`, `badges`, `user_badges`, `feed_events`, `challenges`. The `identities`
+`box_roles`, `workouts`, `results`, `badges`, `user_badges`, `feed_events`,
+`squads`, `squad_members`, `follows`, `referrals`, `challenges`. The `identities`
 table lets you link other identity sources later (Shopify, Circle, watch, …)
 **without restructuring** — each source just adds a row keyed by `user_id`.
 
@@ -105,6 +106,38 @@ one file so they are easy to tune.
 | POST | `/api/challenges` | Create a throwdown (`challengerBoxId`, `opponentBoxId`, `workoutId`, `startsAt`, `endsAt`). |
 | GET | `/api/challenges/box/:boxId` | List a box's challenges (as challenger or opponent). |
 | GET | `/api/challenges/:id/standing` | Head-to-head: each box's avg score × participation for the challenge WOD, within the window. |
+| GET | `/api/box/:boxId/manage-coaches` | Box members with `is_coach` / `is_owner` flags (owner's "Manage coaches" screen). |
+| POST | `/api/box/:boxId/coaches` | Owner-gated: promote/demote a member to/from coach (`actingUserId`, `targetUserId`, `action`). |
+| POST | `/api/box/:boxId/wod` | Coach-gated: program today's WOD (`name`, `type`, `description`, `scaling`); tags `programmed_by`. |
+| GET | `/api/box/:boxId/roster?userId=` | Coach-gated roster: sessions, last logged, week-vs-prev score trend, connection count, quiet & under-connected flags, plus today/total/quiet summary. |
+| POST | `/api/box/:boxId/announce` | Coach-gated: post a box announcement (`announcement` feed event everyone sees). |
+| GET | `/api/users/:userId/onboarding` | Ensures the user's "[Box] — New Crew" cohort squad, returns box, cohort, coaches to meet, and 5 suggested boxmates to follow + current connection count. |
+
+## Coaches & connection-driven onboarding
+
+Coaches are a real, per-box role (`box_roles` table — a user can be both
+`owner` and `coach`), gated server-side and surfaced everywhere:
+
+- **Roles & permissions** (`box_roles (user_id, box_id, role)`): owners
+  designate/remove coaches from a **Manage coaches** screen on the owner
+  dashboard. Coach-only endpoints (program WOD, roster, announce) are gated by
+  `rolesFor()` / `hasCoach()`; owner-only coach management is gated separately.
+  The seed gives every box 2–3 coaches (the owner is owner+coach).
+- **Coach tools** (Profile → "Coach tools" when you're a coach): **program the
+  WOD** (edits today's shared workout, shown to athletes as "🧢 Programmed by
+  Coach [Name]" with scaling on the log screen); **My athletes** roster with
+  recent activity, score trend, connection count, who trained today and who's
+  going quiet; tap an athlete for their full (read-only) profile; **message the
+  box** (persisted announcement everyone sees in the feed).
+- **Coaches as community figures**: a green **Coach** badge on the feed,
+  leaderboard, roster and profiles; coach posts and announcements get
+  **elevated styling** in the feed.
+- **Connection-driven onboarding**: every box has an auto-cohort
+  **"[Box] — New Crew"** squad. When a new member finishes their profile, a
+  wizard walks them through confirming their box, joining the cohort, following
+  3–5 suggested boxmates, and meeting their coaches — so nobody leaves with zero
+  connections. Connection count (`squad_members` + `follows`) is queryable as a
+  churn-risk signal and shown on the coach roster.
 
 ## Referrals, global community & affiliate status
 

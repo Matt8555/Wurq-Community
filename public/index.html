@@ -570,6 +570,61 @@
     .aff-perks { display: flex; flex-direction: column; gap: 3px; margin-top: 10px; }
     .aff-perk { color: var(--chalk); font-size: 0.78rem; opacity: 0.9; }
 
+    /* ---- Coaches & onboarding ---- */
+    .coach-tag { display: inline-block; background: var(--acid); color: #10130a; font-size: 0.6rem;
+      font-weight: 900; letter-spacing: 0.04em; text-transform: uppercase; padding: 2px 6px;
+      border-radius: 5px; vertical-align: middle; margin-left: 4px; }
+    .coach-tag.owner-tag { background: #ffd24a; }
+    .conn-warn { color: var(--danger); font-size: 0.7rem; font-weight: 700; margin-left: 4px; }
+
+    .feed-item.feed-elevated { border-color: var(--acid); background: linear-gradient(135deg, var(--acid-dim), var(--surface)); }
+    .feed-post { margin-top: 6px; padding: 8px 10px; background: var(--surface-2); border-left: 3px solid var(--acid);
+      border-radius: 6px; font-size: 0.84rem; color: var(--chalk); }
+
+    .coach-cta { width: 100%; margin: 4px 0 14px; background: var(--acid-dim); color: var(--acid);
+      border: 1px solid var(--acid); border-radius: 12px; padding: 12px; font-weight: 800; font-size: 0.86rem; cursor: pointer; }
+
+    .coach-stats { display: flex; gap: 10px; margin-bottom: 8px; }
+    .cstat { flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px; text-align: center; }
+    .cstat .n { font-size: 1.5rem; font-weight: 900; }
+    .cstat .l { color: var(--muted); font-size: 0.7rem; margin-top: 2px; }
+    .cstat.warn .n { color: var(--danger); }
+
+    .roster-row { display: flex; align-items: center; gap: 10px; background: var(--surface);
+      border: 1px solid var(--border); border-radius: 12px; padding: 11px 13px; margin-bottom: 8px; cursor: pointer; }
+    .roster-row:active { transform: scale(0.99); }
+    .roster-row .rr-main { flex: 1; min-width: 0; }
+    .roster-row .nm { font-weight: 700; font-size: 0.9rem; }
+    .roster-row .meta { color: var(--muted); font-size: 0.72rem; margin-top: 3px; }
+    .roster-row .rr-status { flex: none; }
+
+    .wod-by { color: var(--acid); font-size: 0.78rem; font-weight: 700; margin: 2px 0 4px; }
+    .wod-scale { margin-top: 10px; padding: 8px 10px; background: var(--surface-2); border-radius: 8px;
+      font-size: 0.82rem; color: var(--chalk); }
+    .wod-scale .ws-lab { display: block; color: var(--muted); font-size: 0.66rem; text-transform: uppercase;
+      letter-spacing: 0.05em; font-weight: 800; margin-bottom: 3px; }
+
+    .ob-step { margin-bottom: 18px; }
+    .ob-head { display: flex; align-items: center; gap: 8px; font-weight: 800; font-size: 0.92rem; margin-bottom: 8px; }
+    .ob-num { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px;
+      background: var(--acid); color: #10130a; border-radius: 999px; font-size: 0.74rem; font-weight: 900; }
+    .ob-card { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .ob-person { display: flex; align-items: center; gap: 10px; background: var(--surface);
+      border: 1px solid var(--border); border-radius: 12px; padding: 9px 12px; margin-bottom: 8px; }
+    .ob-person .op-id { flex: 1; min-width: 0; }
+    .ob-person .nm { font-weight: 700; font-size: 0.86rem; }
+    .ob-person .op-follow { flex: none; }
+
+    .mc-row { display: flex; align-items: center; gap: 10px; background: var(--surface);
+      border: 1px solid var(--border); border-radius: 12px; padding: 11px 13px; margin-bottom: 8px; }
+    .mc-row.is-coach { border-color: var(--acid); }
+    .mc-row .rr-main { flex: 1; min-width: 0; }
+    .mc-row .nm { font-weight: 700; font-size: 0.9rem; }
+    .mc-action { flex: none; }
+    .mc-btn { border: none; border-radius: 999px; padding: 6px 12px; font-size: 0.74rem; font-weight: 800; cursor: pointer; }
+    .mc-btn.promote { background: var(--acid); color: #10130a; }
+    .mc-btn.demote { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+
     .hidden { display: none !important; }
   </style>
 </head>

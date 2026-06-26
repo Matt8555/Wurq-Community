@@ -79,11 +79,13 @@ const SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_memberships_user ON box_memberships(user_id);
 
   CREATE TABLE IF NOT EXISTS workouts (
-    workout_id  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name        TEXT NOT NULL,
-    type        TEXT,
-    description TEXT,
-    wod_date    DATE NOT NULL DEFAULT CURRENT_DATE
+    workout_id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name          TEXT NOT NULL,
+    type          TEXT,
+    description   TEXT,
+    scaling       TEXT,
+    programmed_by UUID REFERENCES users(user_id) ON DELETE SET NULL,
+    wod_date      DATE NOT NULL DEFAULT CURRENT_DATE
   );
 
   CREATE TABLE IF NOT EXISTS results (
@@ -203,6 +205,17 @@ const SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_follows_follower ON follows(follower_user_id);
   CREATE INDEX IF NOT EXISTS idx_follows_followee ON follows(followee_user_id);
+
+  -- Per-box roles. A user can hold more than one role in a box (owner AND coach).
+  CREATE TABLE IF NOT EXISTS box_roles (
+    user_id    UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    box_id     UUID NOT NULL REFERENCES boxes(box_id) ON DELETE CASCADE,
+    role       TEXT NOT NULL,                 -- member | coach | owner
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (user_id, box_id, role)
+  );
+  CREATE INDEX IF NOT EXISTS idx_box_roles_box  ON box_roles(box_id);
+  CREATE INDEX IF NOT EXISTS idx_box_roles_user ON box_roles(user_id);
 `;
 
 // Idempotent fixups for databases created by earlier versions of this app:
@@ -230,6 +243,9 @@ const FIXUP_SQL = `
   ALTER TABLE results ADD COLUMN IF NOT EXISTS movements    JSONB NOT NULL DEFAULT '[]'::jsonb;
 
   ALTER TABLE profiles ADD COLUMN IF NOT EXISTS referral_points INTEGER NOT NULL DEFAULT 0;
+
+  ALTER TABLE workouts ADD COLUMN IF NOT EXISTS scaling       TEXT;
+  ALTER TABLE workouts ADD COLUMN IF NOT EXISTS programmed_by UUID REFERENCES users(user_id) ON DELETE SET NULL;
 `;
 
 // Ensure there is a "Fran" workout for today (idempotent).

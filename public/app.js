@@ -355,9 +355,12 @@ function renderProfileForm() {
     if (pendingAvatarUrl) payload.avatar_url = pendingAvatarUrl;
     btn.disabled = true; btn.textContent = 'Saving…';
     try {
+      const wasOnboarding = onboarding;
       profile = await api('PUT', `/api/profile/${userId}`, payload);
       showToast('Saved ✓');
-      renderProfile(); // -> rich profile once complete
+      // First-time completion → connection-driven onboarding wizard.
+      if (wasOnboarding && profile.profile_complete) renderOnboarding();
+      else renderProfile(); // -> rich profile once complete
     } catch (e) {
       err.textContent = e.message;
       btn.disabled = false; btn.textContent = onboarding ? 'Create profile' : 'Save changes';
@@ -414,38 +417,48 @@ function sparkTimes(history) {
   return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}"><polyline points="${pts}" fill="none" stroke="var(--acid)" stroke-width="2"/></svg>`;
 }
 
-async function renderRichProfile() {
-  setScreenName('Profile');
+async function renderRichProfile(targetId, opts) {
+  opts = opts || {};
+  const id = targetId || userId;
+  const ro = !!opts.readOnly; // viewing another athlete (e.g. a coach)
+  setScreenName(ro ? 'Athlete' : 'Profile');
   content.innerHTML = '<p class="subtitle">Loading…</p>';
   let d, sessions;
   try {
     [d, sessions] = await Promise.all([
-      api('GET', `/api/athlete/${userId}/profile`),
-      api('GET', `/api/athlete/${userId}/history`).then((r) => r.sessions),
+      api('GET', `/api/athlete/${id}/profile`),
+      api('GET', `/api/athlete/${id}/history`).then((r) => r.sessions),
     ]);
   } catch (e) { content.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
 
   const u = d.user, s = d.summary, prs = d.prs, cmp = d.comparison;
   const avatar = u.avatar_url;
+  const coachBadge = u.is_coach ? ' <span class="coach-tag">Coach</span>' : '';
+  const backLink = ro ? `<button class="back-link" id="profBack">← Back</button>` : '';
   const header = `
+    ${backLink}
     <div class="prof-head">
       <div class="avatar ${avatar ? 'has-img' : ''}" style="width:64px;height:64px">
         ${avatar ? `<img src="${escapeAttr(avatar)}" alt="" style="width:100%;height:100%;object-fit:cover"/>` : initials(u.display_name)}
       </div>
       <div class="prof-id">
-        <div class="prof-name">${escapeHtml(u.display_name || 'Athlete')}</div>
-        <div class="prof-sub">${escapeHtml(u.gym_name || 'No box')}${u.experience_level ? ' · ' + labelFor(u.experience_level) : ''}</div>
+        <div class="prof-name">${escapeHtml(u.display_name || 'Athlete')}${coachBadge}</div>
+        <div class="prof-sub">${u.is_coach ? 'Coaches at ' : ''}${escapeHtml(u.gym_name || 'No box')}${u.experience_level ? ' · ' + labelFor(u.experience_level) : ''}</div>
       </div>
-      <button class="edit-btn" id="editProfile">Edit</button>
+      ${ro ? '' : '<button class="edit-btn" id="editProfile">Edit</button>'}
     </div>`;
+  const wireHeader = () => {
+    const eb = content.querySelector('#editProfile'); if (eb) eb.addEventListener('click', () => renderProfileForm());
+    const bb = content.querySelector('#profBack'); if (bb) bb.addEventListener('click', opts.back || (() => setView('profile')));
+  };
 
   if (!s.sessions_total) {
     content.innerHTML = '';
     content.appendChild(el(`<div>${header}
-      <div class="empty">No training history yet.<br/>Log today's WOD to start building your record.</div>
-      <button class="btn-primary" id="goLog">Log today's WOD</button></div>`));
-    content.querySelector('#editProfile').addEventListener('click', () => renderProfileForm());
-    content.querySelector('#goLog').addEventListener('click', () => setView('log'));
+      <div class="empty">No training history yet.${ro ? '' : '<br/>Log today\'s WOD to start building your record.'}</div>
+      ${ro ? '' : '<button class="btn-primary" id="goLog">Log today\'s WOD</button>'}</div>`));
+    wireHeader();
+    const gl = content.querySelector('#goLog'); if (gl) gl.addEventListener('click', () => setView('log'));
     return;
   }
 
@@ -459,6 +472,8 @@ async function renderRichProfile() {
   const wrap = el(`
     <div>
       ${header}
+
+      ${(!ro && u.is_coach) ? '<button class="coach-cta" id="coachTools">🎯 Coach tools — program, roster &amp; announce</button>' : ''}
 
       <div class="fitter">
         <div>
@@ -502,7 +517,7 @@ async function renderRichProfile() {
       <div class="sec-title">🗒 Recent sessions</div>
       <div id="sessions"></div>
 
-      <div class="center" style="margin-top:16px"><button class="link" id="reset2">Not you? Start over</button></div>
+      ${ro ? '' : '<div class="center" style="margin-top:16px"><button class="link" id="reset2">Not you? Start over</button></div>'}
     </div>
   `);
   content.appendChild(wrap);
@@ -528,21 +543,27 @@ async function renderRichProfile() {
           <div class="meta">${fmtDate(x.wod_date)} · ${fmtTime(x.time_seconds)}</div></div>
         <div class="sess-score">${x.holistic_score}</div>
       </div>`);
-    row.addEventListener('click', () => renderSession(x.result_id));
+    row.addEventListener('click', () => renderSession(x.result_id, id, ro ? opts : null));
     sessEl.appendChild(row);
   });
 
-  wrap.querySelector('#editProfile').addEventListener('click', () => renderProfileForm());
-  wrap.querySelector('#reset2').addEventListener('click', () => {
-    localStorage.removeItem(STORAGE_KEY); userId = null; profile = null; setView('profile');
-  });
+  wireHeader();
+  const ct = wrap.querySelector('#coachTools');
+  if (ct) ct.addEventListener('click', () => renderCoach());
+  if (!ro) {
+    const r2 = wrap.querySelector('#reset2');
+    if (r2) r2.addEventListener('click', () => {
+      localStorage.removeItem(STORAGE_KEY); userId = null; profile = null; setView('profile');
+    });
+  }
 }
 
-async function renderSession(resultId) {
+async function renderSession(resultId, athleteId, backOpts) {
+  const aid = athleteId || userId;
   setScreenName('Session');
   content.innerHTML = '<p class="subtitle">Loading…</p>';
   let s;
-  try { s = (await api('GET', `/api/athlete/${userId}/session/${resultId}`)).session; }
+  try { s = (await api('GET', `/api/athlete/${aid}/session/${resultId}`)).session; }
   catch (e) { content.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
   const b = s.breakdown;
   content.innerHTML = '';
@@ -582,7 +603,10 @@ async function renderSession(resultId) {
       <div class="nm">${escapeHtml(m.movement)}</div>
       <div class="move-meta">${m.reps} reps · ${m.rom_pct}% ROM</div>
     </div>`)));
-  content.querySelector('#back').addEventListener('click', () => renderRichProfile());
+  content.querySelector('#back').addEventListener('click', () => {
+    if (athleteId && athleteId !== userId) renderRichProfile(athleteId, backOpts || { readOnly: true });
+    else renderRichProfile();
+  });
 }
 
 // ---- WOD log ----------------------------------------------------------------
@@ -610,7 +634,9 @@ async function renderLog() {
           ${w.type ? `<span class="type-badge">${escapeHtml(w.type)}</span>` : ''}
         </div>
         <div class="wod-date">${fmtDate(w.wod_date)}</div>
+        ${w.programmed_by_name ? `<div class="wod-by">🧢 Programmed by Coach ${escapeHtml(w.programmed_by_name)}</div>` : ''}
         <p class="wod-desc">${escapeHtml(w.description)}</p>
+        ${w.scaling ? `<div class="wod-scale"><span class="ws-lab">Scaling</span>${escapeHtml(w.scaling)}</div>` : ''}
       </div>
 
       <div class="card">
@@ -776,7 +802,7 @@ async function renderMyBox(body, w) {
       <div class="lb-row ${me ? 'me' : ''}">
         <div class="lb-rank">${i + 1}</div>
         <div class="lb-main">
-          <div class="lb-name">${escapeHtml(r.display_name)}${me ? ' · you' : ''}</div>
+          <div class="lb-name">${escapeHtml(r.display_name)}${r.is_coach ? ' <span class="coach-tag">Coach</span>' : ''}${me ? ' · you' : ''}</div>
           <div class="lb-sub">${Math.round(r.rom_pct)}% ROM · ${r.unbroken_sets} unbroken</div>
         </div>
         <div class="lb-score"><div class="s">${num(r.holistic_score)}</div><div class="t">${fmtTime(r.time_seconds)}</div></div>
@@ -813,8 +839,11 @@ async function renderBoxVsBox(body, w) {
 
 // ---- Feed -------------------------------------------------------------------
 function feedText(ev) {
-  const name = `<b>${escapeHtml(ev.display_name)}</b>`;
+  const name = `<b>${escapeHtml(ev.display_name)}</b>${ev.is_coach ? ' <span class="coach-tag">Coach</span>' : ''}`;
   const p = ev.payload || {};
+  if (ev.type === 'announcement') {
+    return `${name} posted a box announcement 📣<div class="feed-post">${escapeHtml(p.text || '')}</div>`;
+  }
   if (ev.type === 'result_logged') {
     return `${name} logged <b>${escapeHtml(p.workout_name || 'a workout')}</b> — <span class="accent">${num(p.holistic_score)}</span>`;
   }
@@ -1010,8 +1039,9 @@ function affiliateCardHtml(a) {
 }
 
 function feedItemEl(ev) {
+  const elevated = ev.is_coach || ev.type === 'announcement';
   const item = el(`
-    <div class="feed-item">
+    <div class="feed-item ${elevated ? 'feed-elevated' : ''}">
       ${avatarHtml(ev.avatar_url, ev.display_name, 'feed-av')}
       <div class="feed-body">
         <div class="feed-text">${feedText(ev)}</div>
@@ -1209,8 +1239,9 @@ function makeFollowButton(uid) {
 }
 function globalFeedItemEl(ev) {
   const isCb = ev.type === 'comeback';
+  const elevated = ev.is_coach || ev.type === 'announcement';
   const item = el(`
-    <div class="feed-item ${isCb ? 'feed-comeback' : ''}">
+    <div class="feed-item ${isCb ? 'feed-comeback' : ''} ${elevated ? 'feed-elevated' : ''}">
       ${avatarHtml(ev.avatar_url, ev.display_name, 'feed-av')}
       <div class="feed-body">
         <div class="feed-text">${feedText(ev)}</div>
@@ -1519,6 +1550,7 @@ async function renderOwner() {
   if (ownerView === 'compete') return renderOwnerCompete();
   if (ownerView === 'throwdown') return renderOwnerThrowdown();
   if (ownerView === 'engage') return renderOwnerEngage();
+  if (ownerView === 'coaches') return renderManageCoaches();
   return renderOwnerHome();
 }
 
@@ -1562,6 +1594,8 @@ async function renderOwnerHome() {
         <button class="btn-outline" id="toCompete">View competition →</button>
       </div>` : ''}
 
+      <button class="btn-outline wide" id="toCoaches">🧢 Manage coaches</button>
+
       ${aff ? `<div class="sec-title">🏅 WurQ affiliate status</div>${affiliateCardHtml(aff)}` : ''}
 
       ${goal ? `<div class="sec-title">🎯 Team goal</div>${teamGoalCardHtml(goal)}` : ''}
@@ -1594,6 +1628,62 @@ async function renderOwnerHome() {
 
   const cmp = wrap.querySelector('#toCompete');
   if (cmp) cmp.addEventListener('click', () => setOwnerView('compete'));
+  const tc = wrap.querySelector('#toCoaches');
+  if (tc) tc.addEventListener('click', () => setOwnerView('coaches'));
+}
+
+async function renderManageCoaches() {
+  setScreenName('Coaches');
+  content.innerHTML = '<p class="subtitle">Loading…</p>';
+  const boxId = ownerBox.box_id;
+  // The acting user must be the box owner; in the demo that's the saved profile.
+  const actingUserId = userId;
+  let data;
+  try { data = await api('GET', `/api/box/${boxId}/manage-coaches`); }
+  catch (e) { content.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+
+  content.innerHTML = '';
+  const coaches = data.members.filter((m) => m.is_coach || m.is_owner);
+  const wrap = el(`
+    <div>
+      <button class="back-link" id="mcBack">← Back to dashboard</button>
+      <h1 class="title">Manage coaches</h1>
+      <p class="subtitle">${escapeHtml(ownerBox.name)} · ${coaches.length} on staff</p>
+      <div class="action-banner">Tap to promote a member to coach or step them down. Owners always keep coach powers.</div>
+      <div id="mcList"></div>
+    </div>
+  `);
+  content.appendChild(wrap);
+  wrap.querySelector('#mcBack').addEventListener('click', () => setOwnerView('home'));
+
+  const list = wrap.querySelector('#mcList');
+  const render = () => {
+    list.innerHTML = '';
+    data.members.forEach((m) => {
+      const badge = m.is_owner ? '<span class="coach-tag owner-tag">Owner</span>'
+        : (m.is_coach ? '<span class="coach-tag">Coach</span>' : '');
+      const btn = m.is_owner
+        ? '<span class="muted-note">always coach</span>'
+        : `<button class="mc-btn ${m.is_coach ? 'demote' : 'promote'}" data-id="${m.user_id}" data-act="${m.is_coach ? 'demote' : 'promote'}">${m.is_coach ? 'Remove coach' : 'Make coach'}</button>`;
+      list.appendChild(el(`
+        <div class="mc-row ${m.is_coach || m.is_owner ? 'is-coach' : ''}">
+          <div class="rr-main"><div class="nm">${escapeHtml(m.display_name)} ${badge}</div></div>
+          <div class="mc-action">${btn}</div>
+        </div>`));
+    });
+    list.querySelectorAll('.mc-btn').forEach((b) => b.addEventListener('click', async () => {
+      const id = b.dataset.id, action = b.dataset.act;
+      b.disabled = true; b.textContent = '…';
+      try {
+        const r = await api('POST', `/api/box/${boxId}/coaches`, { actingUserId, targetUserId: id, action });
+        const m = data.members.find((x) => x.user_id === id);
+        if (m) m.is_coach = r.is_coach;
+        showToast(r.is_coach ? 'Promoted to coach 🧢' : 'Stepped down from coach');
+        render();
+      } catch (e) { showToast(e.message); b.disabled = false; b.textContent = action === 'demote' ? 'Remove coach' : 'Make coach'; }
+    }));
+  };
+  render();
 }
 
 async function renderOwnerCompete() {
@@ -1789,6 +1879,209 @@ async function renderOwnerEngage() {
     showToast(`Posted ${w.name} to ${ownerBox.name} (mock)`));
   wrap.querySelector('#rally').addEventListener('click', () =>
     showToast('Rally sent to quiet members 💪 (mock)'));
+}
+
+// ---- Coach tools ------------------------------------------------------------
+async function renderCoach() {
+  setScreenName('Coach');
+  if (!profile || !profile.box_id) { needBoxPrompt('Set your gym / box to use coach tools.'); return; }
+  const boxId = profile.box_id;
+  content.innerHTML = '<p class="subtitle">Loading roster…</p>';
+  let roster;
+  try { roster = await api('GET', `/api/box/${boxId}/roster?userId=${userId}`); }
+  catch (e) { content.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+
+  content.innerHTML = '';
+  const wrap = el(`
+    <div>
+      <button class="back-link" id="cBack">← Back to profile</button>
+      <h1 class="title">Coach tools</h1>
+      <p class="subtitle">${escapeHtml(profile.box_name || profile.gym_name || 'Your box')}</p>
+
+      <div class="coach-stats">
+        <div class="cstat"><div class="n">${roster.logged_today}</div><div class="l">trained today</div></div>
+        <div class="cstat"><div class="n">${roster.total}</div><div class="l">athletes</div></div>
+        <div class="cstat warn"><div class="n">${roster.quiet_count}</div><div class="l">going quiet</div></div>
+      </div>
+
+      <div class="sec-title">🏋 Program today's WOD</div>
+      <div class="card">
+        <label class="field"><span class="lbl">WOD name ★</span>
+          <input type="text" id="wName" placeholder="e.g. Fran" maxlength="60" /></label>
+        <label class="field"><span class="lbl">Format</span>
+          <input type="text" id="wType" placeholder="e.g. For Time" /></label>
+        <label class="field"><span class="lbl">Description</span>
+          <textarea id="wDesc" placeholder="21-15-9 Thrusters &amp; Pull-ups"></textarea></label>
+        <label class="field"><span class="lbl">Scaling</span>
+          <textarea id="wScale" placeholder="Scaled: 65/45 lb, banded pull-ups"></textarea></label>
+        <button class="btn-primary" id="wSave">Program WOD</button>
+        <div class="error" id="wErr"></div>
+      </div>
+
+      <div class="sec-title">📣 Message the box</div>
+      <div class="card">
+        <textarea id="annText" placeholder="Drop an announcement everyone will see in the feed…" maxlength="500"></textarea>
+        <button class="btn-primary" id="annSave">Post announcement</button>
+        <div class="error" id="annErr"></div>
+      </div>
+
+      <div class="sec-title">👥 My athletes <span class="muted-note" style="font-weight:400">tap for detail</span></div>
+      <div id="roster"></div>
+    </div>
+  `);
+  content.appendChild(wrap);
+
+  wrap.querySelector('#cBack').addEventListener('click', () => renderRichProfile());
+
+  // Pre-fill from today's programmed WOD if any.
+  (async () => {
+    try {
+      const w = await api('GET', '/api/wod/today');
+      if (w && w.name) {
+        wrap.querySelector('#wName').value = w.name || '';
+        wrap.querySelector('#wType').value = w.type || '';
+        wrap.querySelector('#wDesc').value = w.description || '';
+        wrap.querySelector('#wScale').value = w.scaling || '';
+      }
+    } catch (_) { /* best effort */ }
+  })();
+
+  const wSave = wrap.querySelector('#wSave'), wErr = wrap.querySelector('#wErr');
+  wSave.addEventListener('click', async () => {
+    wErr.textContent = '';
+    const payload = {
+      actingUserId: userId,
+      name: wrap.querySelector('#wName').value.trim(),
+      type: wrap.querySelector('#wType').value.trim(),
+      description: wrap.querySelector('#wDesc').value.trim(),
+      scaling: wrap.querySelector('#wScale').value.trim(),
+    };
+    wSave.disabled = true; wSave.textContent = 'Programming…';
+    try {
+      await api('POST', `/api/box/${boxId}/wod`, payload);
+      showToast('WOD programmed ✓ — shown as “programmed by you”');
+      wSave.textContent = 'Programmed ✓';
+      setTimeout(() => { wSave.disabled = false; wSave.textContent = 'Program WOD'; }, 1500);
+    } catch (e) { wErr.textContent = e.message; wSave.disabled = false; wSave.textContent = 'Program WOD'; }
+  });
+
+  const annSave = wrap.querySelector('#annSave'), annErr = wrap.querySelector('#annErr');
+  annSave.addEventListener('click', async () => {
+    annErr.textContent = '';
+    const text = wrap.querySelector('#annText').value.trim();
+    if (!text) { annErr.textContent = 'Write something to announce.'; return; }
+    annSave.disabled = true; annSave.textContent = 'Posting…';
+    try {
+      await api('POST', `/api/box/${boxId}/announce`, { actingUserId: userId, text });
+      showToast('Announcement posted to the box 📣');
+      wrap.querySelector('#annText').value = '';
+      annSave.textContent = 'Posted ✓';
+      setTimeout(() => { annSave.disabled = false; annSave.textContent = 'Post announcement'; }, 1500);
+    } catch (e) { annErr.textContent = e.message; annSave.disabled = false; annSave.textContent = 'Post announcement'; }
+  });
+
+  const rosterEl = wrap.querySelector('#roster');
+  if (!roster.members.length) rosterEl.appendChild(el('<div class="empty">No athletes in this box yet.</div>'));
+  roster.members.forEach((m) => {
+    const trend = (m.week_avg != null && m.prev_avg != null)
+      ? `<span class="delta ${m.week_avg >= m.prev_avg ? 'up' : 'down'}">${m.week_avg >= m.prev_avg ? '▲' : '▼'} ${Math.abs(Math.round((m.week_avg - m.prev_avg) * 10) / 10)}</span>`
+      : '';
+    const status = m.logged_today
+      ? '<span class="pill-hot">trained today</span>'
+      : (m.quiet ? `<span class="pill-warn">${m.days_since == null ? 'no logs' : m.days_since + 'd quiet'}</span>` : '');
+    const tags = [];
+    if (m.is_coach) tags.push('<span class="coach-tag">Coach</span>');
+    if (m.under_connected) tags.push('<span class="conn-warn">⚠ ' + m.connection_count + ' connections</span>');
+    const row = el(`
+      <div class="roster-row">
+        <div class="rr-main">
+          <div class="nm">${escapeHtml(m.display_name)} ${tags.join(' ')}</div>
+          <div class="meta">${m.sessions} logged · week avg ${m.week_avg ?? '—'} ${trend} · ${m.connection_count} connections</div>
+        </div>
+        <div class="rr-status">${status}</div>
+      </div>`);
+    row.addEventListener('click', () => renderRichProfile(m.user_id, { readOnly: true, back: () => renderCoach() }));
+    rosterEl.appendChild(row);
+  });
+}
+
+// ---- Connection-driven onboarding -------------------------------------------
+async function renderOnboarding() {
+  setScreenName('Welcome');
+  content.innerHTML = '<p class="subtitle">Setting up your crew…</p>';
+  let d;
+  try { d = await api('GET', `/api/users/${userId}/onboarding`); }
+  catch (e) { content.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+  if (!d.box) { renderRichProfile(); return; }
+  await ensureFollowing();
+
+  const finish = () => { showToast('You\'re all set — welcome to the crew! 🎉'); renderRichProfile(); };
+
+  content.innerHTML = '';
+  const wrap = el(`
+    <div>
+      <h1 class="title">Welcome to ${escapeHtml(d.box.name)} 👋</h1>
+      <p class="subtitle">Let's get you connected — athletes with a crew stick around.</p>
+
+      <div class="ob-step">
+        <div class="ob-head"><span class="ob-num">1</span> Your box</div>
+        <div class="card ob-card">You're training at <b>${escapeHtml(d.box.name)}</b>. This is your home community.</div>
+      </div>
+
+      <div class="ob-step">
+        <div class="ob-head"><span class="ob-num">2</span> Join the new crew</div>
+        <div class="card ob-card">
+          <div><b>${escapeHtml(d.cohort.name)}</b><div class="muted-note">${d.cohort.member_count} members finding their feet together</div></div>
+          <span class="pill-hot" id="cohortBadge">Joined ✓</span>
+        </div>
+      </div>
+
+      <div class="ob-step">
+        <div class="ob-head"><span class="ob-num">3</span> Follow a few people</div>
+        <div class="muted-note" style="margin-bottom:8px">Follow 3–5 to fill your feed with familiar faces.</div>
+        <div id="obSuggest"></div>
+      </div>
+
+      ${d.coaches.length ? `<div class="ob-step">
+        <div class="ob-head"><span class="ob-num">4</span> Meet your coaches</div>
+        <div id="obCoaches"></div>
+      </div>` : ''}
+
+      <button class="btn-primary" id="obDone">I'm ready — let's go</button>
+      <div class="center" style="margin-top:10px"><button class="link" id="obSkip">Skip for now</button></div>
+    </div>
+  `);
+  content.appendChild(wrap);
+
+  const sg = wrap.querySelector('#obSuggest');
+  if (!d.suggestions.length) sg.appendChild(el('<div class="empty">No suggestions yet — check back as your box grows.</div>'));
+  d.suggestions.forEach((s) => {
+    const row = el(`
+      <div class="ob-person">
+        ${avatarHtml(null, s.display_name, 'feed-av')}
+        <div class="op-id"><div class="nm">${escapeHtml(s.display_name)}${s.is_coach ? ' <span class="coach-tag">Coach</span>' : ''}</div></div>
+        <span class="op-follow"></span>
+      </div>`);
+    const fb = makeFollowButton(s.user_id);
+    if (fb) row.querySelector('.op-follow').appendChild(fb);
+    sg.appendChild(row);
+  });
+
+  const cc = wrap.querySelector('#obCoaches');
+  if (cc) d.coaches.forEach((c) => {
+    const row = el(`
+      <div class="ob-person">
+        ${avatarHtml(null, c.display_name, 'feed-av')}
+        <div class="op-id"><div class="nm">${escapeHtml(c.display_name)} <span class="coach-tag">Coach</span></div></div>
+        <span class="op-follow"></span>
+      </div>`);
+    const fb = makeFollowButton(c.user_id);
+    if (fb) row.querySelector('.op-follow').appendChild(fb);
+    cc.appendChild(row);
+  });
+
+  wrap.querySelector('#obDone').addEventListener('click', finish);
+  wrap.querySelector('#obSkip').addEventListener('click', () => renderRichProfile());
 }
 
 // ---- bootstrap --------------------------------------------------------------
