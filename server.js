@@ -489,7 +489,7 @@ app.get('/api/owner/box/:boxId/dashboard', wrap(async (req, res) => {
          FROM box_memberships m
          LEFT JOIN profiles p ON p.user_id = m.user_id
          LEFT JOIN results r ON r.user_id = m.user_id
-        WHERE m.box_id = $1
+        WHERE m.box_id = $1 AND m.joined_at < now() - interval '10 days'
         GROUP BY m.user_id, p.display_name
        HAVING MAX(r.created_at) IS NULL OR MAX(r.created_at) < now() - interval '10 days'
         ORDER BY days_since DESC NULLS FIRST
@@ -789,6 +789,188 @@ app.get('/api/athlete/:userId/profile', wrap(async (req, res) => {
     prs: { best_holistic: bestH, fastest, highest_power: bestP, longest_streak: longest },
     heatmap, trend, workload, comparison, benchmarks,
   });
+}));
+
+// ---- API: team goal (collective box goal, live progress) --------------------
+const GOAL_LABEL = { total_workouts: 'workouts', total_holistic_points: 'points', participation_days: 'training days' };
+app.get('/api/box/:boxId/team-goal', wrap(async (req, res) => {
+  const { boxId } = req.params;
+  if (!isUuid(boxId)) return res.status(400).json({ error: 'Invalid box id.' });
+  const g = (await pool.query(
+    `SELECT * FROM team_goals WHERE box_id = $1 AND status = 'active' ORDER BY ends_at DESC LIMIT 1`, [boxId])).rows[0];
+  if (!g) return res.json({ goal: null });
+
+  const win = [boxId, g.starts_at, g.ends_at];
+  const base = `FROM results r JOIN box_memberships m ON m.user_id = r.user_id
+                WHERE m.box_id = $1 AND r.created_at BETWEEN $2 AND $3`;
+  const metric = g.type === 'total_holistic_points' ? 'COALESCE(SUM(r.holistic_score),0)'
+    : g.type === 'participation_days' ? 'COUNT(DISTINCT (r.user_id, r.created_at::date))' : 'COUNT(*)';
+  const contribExpr = g.type === 'total_holistic_points' ? 'ROUND(SUM(r.holistic_score))'
+    : g.type === 'participation_days' ? 'COUNT(DISTINCT r.created_at::date)' : 'COUNT(*)';
+
+  const current = Math.round(Number((await pool.query(`SELECT ${metric} AS n ${base}`, win)).rows[0].n));
+  const contributors = (await pool.query(`SELECT COUNT(DISTINCT r.user_id)::int AS n ${base}`, win)).rows[0].n;
+  const top = (await pool.query(
+    `SELECT r.user_id, COALESCE(NULLIF(p.display_name,''),'Athlete') AS display_name, ${contribExpr}::int AS contribution
+       FROM results r JOIN box_memberships m ON m.user_id = r.user_id
+       LEFT JOIN profiles p ON p.user_id = r.user_id
+      WHERE m.box_id = $1 AND r.created_at BETWEEN $2 AND $3
+      GROUP BY r.user_id, p.display_name ORDER BY contribution DESC LIMIT 5`, win)).rows;
+
+  const target = Number(g.target);
+  res.json({
+    goal: {
+      id: g.id, type: g.type, label: GOAL_LABEL[g.type] || 'workouts',
+      target, current, pct: Math.min(100, Math.round((100 * current) / Math.max(target, 1))),
+      remaining: Math.max(0, target - current), contributors, top,
+      days_remaining: Math.max(0, Math.ceil((new Date(g.ends_at) - Date.now()) / 86400000)),
+      starts_at: g.starts_at, ends_at: g.ends_at,
+    },
+  });
+}));
+
+// ---- API: box members + newcomers -------------------------------------------
+app.get('/api/box/:boxId/members', wrap(async (req, res) => {
+  const { boxId } = req.params;
+  if (!isUuid(boxId)) return res.status(400).json({ error: 'Invalid box id.' });
+  const { rows } = await pool.query(
+    `SELECT m.user_id, COALESCE(NULLIF(p.display_name,''),'Athlete') AS display_name
+       FROM box_memberships m LEFT JOIN profiles p ON p.user_id = m.user_id
+      WHERE m.box_id = $1 ORDER BY display_name LIMIT 300`, [boxId]);
+  res.json({ members: rows });
+}));
+
+app.get('/api/box/:boxId/newcomers', wrap(async (req, res) => {
+  const { boxId } = req.params;
+  if (!isUuid(boxId)) return res.status(400).json({ error: 'Invalid box id.' });
+  const { rows } = await pool.query(
+    `SELECT m.user_id, COALESCE(NULLIF(p.display_name,''),'Athlete') AS display_name, m.joined_at
+       FROM box_memberships m LEFT JOIN profiles p ON p.user_id = m.user_id
+      WHERE m.box_id = $1 AND m.joined_at >= now() - interval '7 days'
+      ORDER BY m.joined_at DESC LIMIT 12`, [boxId]);
+  res.json({ newcomers: rows });
+}));
+
+// ---- API: squads ------------------------------------------------------------
+app.get('/api/box/:boxId/squads', wrap(async (req, res) => {
+  const { boxId } = req.params;
+  if (!isUuid(boxId)) return res.status(400).json({ error: 'Invalid box id.' });
+  const userId = isUuid(req.query.userId) ? req.query.userId : null;
+  const { rows } = await pool.query(
+    `SELECT s.id, s.name, COUNT(sm.user_id)::int AS member_count,
+            COALESCE(BOOL_OR(sm.user_id = $2), false) AS is_member
+       FROM squads s LEFT JOIN squad_members sm ON sm.squad_id = s.id
+      WHERE s.box_id = $1 GROUP BY s.id, s.name ORDER BY member_count DESC, s.name`,
+    [boxId, userId]);
+  res.json({ squads: rows });
+}));
+
+app.get('/api/users/:userId/squads', wrap(async (req, res) => {
+  const { userId } = req.params;
+  if (!isUuid(userId)) return res.status(400).json({ error: 'Invalid user id.' });
+  const { rows } = await pool.query(
+    `SELECT s.id, s.name, s.box_id, b.name AS box_name
+       FROM squad_members sm JOIN squads s ON s.id = sm.squad_id JOIN boxes b ON b.box_id = s.box_id
+      WHERE sm.user_id = $1 ORDER BY s.name`, [userId]);
+  res.json({ squads: rows });
+}));
+
+app.post('/api/squads', wrap(async (req, res) => {
+  const b = req.body || {};
+  const boxId = b.box_id || b.boxId;
+  const name = typeof b.name === 'string' ? b.name.trim() : '';
+  if (!isUuid(boxId)) return res.status(400).json({ error: 'A valid box_id is required.' });
+  if (!name || name.length > 60) return res.status(400).json({ error: 'A squad name (1–60 chars) is required.' });
+  const box = await pool.query('SELECT 1 FROM boxes WHERE box_id = $1', [boxId]);
+  if (!box.rows[0]) return res.status(404).json({ error: 'Box not found.' });
+  const { rows } = await pool.query(
+    `INSERT INTO squads (box_id, name) VALUES ($1, $2) RETURNING id, box_id, name`, [boxId, name]);
+  res.status(201).json(rows[0]);
+}));
+
+app.post('/api/squads/:squadId/join', wrap(async (req, res) => {
+  const { squadId } = req.params;
+  const userId = (req.body || {}).userId || (req.body || {}).user_id;
+  if (!isUuid(squadId) || !isUuid(userId)) return res.status(400).json({ error: 'Invalid id.' });
+  const sq = await pool.query('SELECT 1 FROM squads WHERE id = $1', [squadId]);
+  if (!sq.rows[0]) return res.status(404).json({ error: 'Squad not found.' });
+  await pool.query(
+    `INSERT INTO squad_members (squad_id, user_id) VALUES ($1, $2) ON CONFLICT (squad_id, user_id) DO NOTHING`,
+    [squadId, userId]);
+  res.json({ ok: true, joined: true });
+}));
+
+app.post('/api/squads/:squadId/leave', wrap(async (req, res) => {
+  const { squadId } = req.params;
+  const userId = (req.body || {}).userId || (req.body || {}).user_id;
+  if (!isUuid(squadId) || !isUuid(userId)) return res.status(400).json({ error: 'Invalid id.' });
+  await pool.query('DELETE FROM squad_members WHERE squad_id = $1 AND user_id = $2', [squadId, userId]);
+  res.json({ ok: true, joined: false });
+}));
+
+app.get('/api/squads/:squadId/leaderboard/:workoutId', wrap(async (req, res) => {
+  const { squadId, workoutId } = req.params;
+  if (!isUuid(squadId) || !isUuid(workoutId)) return res.status(400).json({ error: 'Invalid id.' });
+  const sq = await pool.query('SELECT id, name, box_id FROM squads WHERE id = $1', [squadId]);
+  if (!sq.rows[0]) return res.status(404).json({ error: 'Squad not found.' });
+  const { rows } = await pool.query(
+    `SELECT r.user_id, COALESCE(NULLIF(p.display_name,''),'Athlete') AS display_name, p.avatar_url,
+            r.time_seconds, r.rom_pct, r.unbroken_sets, r.holistic_score
+       FROM squad_members sm
+       JOIN results r ON r.user_id = sm.user_id AND r.workout_id = $2
+       LEFT JOIN profiles p ON p.user_id = r.user_id
+      WHERE sm.squad_id = $1 ORDER BY r.holistic_score DESC NULLS LAST, r.time_seconds ASC`,
+    [squadId, workoutId]);
+  res.json({ squad: sq.rows[0], results: rows });
+}));
+
+app.get('/api/squads/:squadId/feed', wrap(async (req, res) => {
+  const { squadId } = req.params;
+  if (!isUuid(squadId)) return res.status(400).json({ error: 'Invalid id.' });
+  const sq = await pool.query('SELECT id, name FROM squads WHERE id = $1', [squadId]);
+  if (!sq.rows[0]) return res.status(404).json({ error: 'Squad not found.' });
+  const { rows } = await pool.query(
+    `SELECT f.event_id, f.user_id, f.type, f.ref_id, f.payload, f.kudos, f.created_at,
+            COALESCE(NULLIF(p.display_name,''),'Athlete') AS display_name, p.avatar_url
+       FROM feed_events f JOIN squad_members sm ON sm.user_id = f.user_id
+       LEFT JOIN profiles p ON p.user_id = f.user_id
+      WHERE sm.squad_id = $1 ORDER BY f.created_at DESC LIMIT 50`, [squadId]);
+  res.json({ squad: sq.rows[0], events: rows });
+}));
+
+app.get('/api/squads/:squadId/quiet', wrap(async (req, res) => {
+  const { squadId } = req.params;
+  if (!isUuid(squadId)) return res.status(400).json({ error: 'Invalid id.' });
+  const { rows } = await pool.query(
+    `SELECT sm.user_id, COALESCE(NULLIF(p.display_name,''),'Athlete') AS display_name,
+            (CURRENT_DATE - MAX(r.created_at)::date) AS days_since
+       FROM squad_members sm LEFT JOIN profiles p ON p.user_id = sm.user_id
+       LEFT JOIN results r ON r.user_id = sm.user_id
+      WHERE sm.squad_id = $1
+      GROUP BY sm.user_id, p.display_name
+     HAVING MAX(r.created_at) IS NULL OR MAX(r.created_at) < now() - interval '7 days'
+      ORDER BY days_since DESC NULLS FIRST LIMIT 8`, [squadId]);
+  res.json({ members: rows.map((m) => ({ ...m, days_since: m.days_since == null ? null : Number(m.days_since) })) });
+}));
+
+// ---- API: shout-out (public gratitude -> feed event) ------------------------
+app.post('/api/shoutout', wrap(async (req, res) => {
+  const b = req.body || {};
+  const fromUserId = b.fromUserId || b.from_user_id;
+  const toUserId = b.toUserId || b.to_user_id;
+  const text = typeof b.text === 'string' ? b.text.trim() : '';
+  if (!isUuid(fromUserId) || !isUuid(toUserId)) return res.status(400).json({ error: 'Valid user ids are required.' });
+  if (fromUserId === toUserId) return res.status(400).json({ error: 'You can\'t shout out yourself 😅' });
+  if (!text || text.length > 280) return res.status(400).json({ error: 'Shout-out text (1–280 chars) is required.' });
+  const to = await pool.query(
+    `SELECT COALESCE(NULLIF(p.display_name,''),'Athlete') AS name FROM users u
+       LEFT JOIN profiles p ON p.user_id = u.user_id WHERE u.user_id = $1`, [toUserId]);
+  if (!to.rows[0]) return res.status(404).json({ error: 'Recipient not found.' });
+  const { rows } = await pool.query(
+    `INSERT INTO feed_events (user_id, type, ref_id, payload) VALUES ($1, 'shoutout', $2, $3)
+       RETURNING event_id, created_at`,
+    [fromUserId, toUserId, JSON.stringify({ to_user_id: toUserId, to_name: to.rows[0].name, text })]);
+  res.status(201).json({ ok: true, event_id: rows[0].event_id, to_name: to.rows[0].name });
 }));
 
 // ---- API: health / diagnostics (read-only) ----------------------------------

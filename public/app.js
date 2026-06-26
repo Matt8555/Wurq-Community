@@ -19,6 +19,7 @@ let currentView = 'profile';     // 'profile' | 'log' | 'leaderboard' | 'communi
 let todayWorkout = null;
 let lbTab = 'box';               // 'box' | 'boxes'
 let communitySpace = 'all';      // selected Circle space (mock)
+let communityTab = 'hub';        // 'hub' (engagement) | 'circle' (mock embed)
 const likedPosts = new Set();    // client-only like state for the Circle mock
 let pendingAvatarUrl = null;
 
@@ -694,12 +695,20 @@ function renderLogged(saved, w, newBadges, prs) {
           <div class="bu-name">${escapeHtml(b.name)}</div>
           <div class="bu-desc">${escapeHtml(b.description || '')}</div>
         </div>`).join('')}
+      <div id="goalTick"></div>
       <button class="btn-primary" id="toLb">View leaderboard</button>
       <div class="center" style="margin-top:14px"><button class="link" id="again">Edit my result</button></div>
     </div>
   `));
   countUp(content.querySelector('#scoreNum'), score);
   content.querySelector('#toLb').addEventListener('click', () => { lbTab = 'box'; setView('leaderboard'); });
+  // Show the box team goal ticking up from this logged workout.
+  if (profile && profile.box_id) {
+    api('GET', `/api/box/${profile.box_id}/team-goal`).then((res) => {
+      const g = res.goal; const node = content.querySelector('#goalTick');
+      if (g && node) node.appendChild(el(`<div class="goal-tick">▲ +1 to your box goal · <b>${g.current}/${g.target}</b> ${escapeHtml(g.label)}</div>`));
+    }).catch(() => {});
+  }
   content.querySelector('#again').addEventListener('click', () => renderLog());
 }
 
@@ -813,6 +822,9 @@ function feedText(ev) {
   }
   if (ev.type === 'pr') {
     return `${name} set a PR — <span class="accent">${escapeHtml(p.label || 'New PR')}</span> 🎉`;
+  }
+  if (ev.type === 'shoutout') {
+    return `${name} gave a shout-out to <span class="accent">${escapeHtml(p.to_name || 'a teammate')}</span> 🙌<div class="feed-post">“${escapeHtml(p.text || '')}”</div>`;
   }
   return `${name} did something`;
 }
@@ -932,14 +944,233 @@ function spaceName(key) {
   return s ? s.name : 'All posts';
 }
 
+// Community area: a "Community" engagement hub + the "Circle" embed mock.
 function renderCommunity() {
   setScreenName('Community');
+  if (!userId) return setView('profile');
   content.innerHTML = '';
+  const wrap = el(`
+    <div>
+      <div class="tabs" id="commTabs">
+        <button data-ct="hub">Community</button>
+        <button data-ct="circle">Circle</button>
+      </div>
+      <div id="commBody"></div>
+    </div>
+  `);
+  content.appendChild(wrap);
+  const tabsEl = wrap.querySelector('#commTabs');
+  tabsEl.querySelectorAll('button').forEach((b) => b.classList.toggle('active', b.dataset.ct === communityTab));
+  tabsEl.addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    communityTab = b.dataset.ct; renderCommunity();
+  });
+  const body = wrap.querySelector('#commBody');
+  if (communityTab === 'circle') return renderCircleInto(body);
+  return renderCommunityHub(body);
+}
 
+// Team-goal progress card (centerpiece).
+function teamGoalCardHtml(g) {
+  const top = g.top.slice(0, 3).map((t) => escapeHtml(t.display_name.split(' ')[0])).join(', ');
+  return `
+    <div class="goal-card">
+      <div class="goal-head"><span class="goal-title">🎯 Box goal</span><span class="goal-days">${g.days_remaining}d left</span></div>
+      <div class="goal-metric">${g.current}<span class="goal-of"> / ${g.target} ${escapeHtml(g.label)}</span></div>
+      <div class="goal-bar"><span style="width:${g.pct}%"></span></div>
+      <div class="goal-sub"><b>${g.remaining}</b> to go · ${g.contributors} contributors</div>
+      ${top ? `<div class="goal-top">🔝 Top: ${top}</div>` : ''}
+    </div>`;
+}
+
+function feedItemEl(ev) {
+  const item = el(`
+    <div class="feed-item">
+      ${avatarHtml(ev.avatar_url, ev.display_name, 'feed-av')}
+      <div class="feed-body">
+        <div class="feed-text">${feedText(ev)}</div>
+        <div class="feed-meta">
+          <span class="feed-time">${timeAgo(ev.created_at)}</span>
+          <button class="kudos" data-id="${escapeAttr(ev.event_id)}">👏 <span class="kudos-n">${ev.kudos}</span></button>
+        </div>
+      </div>
+    </div>`);
+  const btn = item.querySelector('.kudos');
+  btn.addEventListener('click', async () => {
+    try { const r = await api('POST', `/api/feed/${ev.event_id}/kudos`); item.querySelector('.kudos-n').textContent = r.kudos; btn.classList.add('kudosed'); }
+    catch (e) { showToast(e.message); }
+  });
+  return item;
+}
+
+async function renderCommunityHub(container) {
+  if (!profile || !profile.box_id) {
+    container.innerHTML = '';
+    container.appendChild(el(`<div class="empty">Set your gym / box on your profile to join the community.</div>
+      <button class="btn-primary" id="toProf">Set your gym</button>`));
+    container.querySelector('#toProf').addEventListener('click', () => setView('profile'));
+    return;
+  }
+  container.innerHTML = '<p class="subtitle">Loading…</p>';
+  const boxId = profile.box_id;
+  let goal, squads, newcomers, members;
+  try {
+    [goal, squads, newcomers, members] = await Promise.all([
+      api('GET', `/api/box/${boxId}/team-goal`).then((r) => r.goal),
+      api('GET', `/api/box/${boxId}/squads?userId=${userId}`).then((r) => r.squads),
+      api('GET', `/api/box/${boxId}/newcomers`).then((r) => r.newcomers),
+      api('GET', `/api/box/${boxId}/members`).then((r) => r.members),
+    ]);
+  } catch (e) { container.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+
+  container.innerHTML = '';
+  const wrap = el(`
+    <div>
+      ${goal ? teamGoalCardHtml(goal) : ''}
+      <button class="btn-outline wide" id="giveShout">🙌 Give a shout-out</button>
+      <div id="shoutComposer"></div>
+      <div class="sec-title">Squads in ${escapeHtml(profile.box_name || 'your box')}</div>
+      <div id="squads"></div>
+      <div class="sec-title">👋 New this week</div>
+      <div id="newcomers"></div>
+    </div>
+  `);
+  container.appendChild(wrap);
+
+  const sqEl = wrap.querySelector('#squads');
+  if (!squads.length) sqEl.appendChild(el('<div class="muted-note">No squads yet.</div>'));
+  squads.forEach((s) => {
+    const row = el(`
+      <div class="squad-row">
+        <div class="squad-main" data-id="${s.id}">
+          <div class="nm">${escapeHtml(s.name)}</div>
+          <div class="meta">${s.member_count} member${s.member_count === 1 ? '' : 's'}</div>
+        </div>
+        <button class="squad-join ${s.is_member ? 'joined' : ''}" data-member="${s.is_member}">${s.is_member ? 'Joined' : 'Join'}</button>
+      </div>`);
+    row.querySelector('.squad-main').addEventListener('click', () => renderSquadDetail(s.id));
+    const jb = row.querySelector('.squad-join');
+    jb.addEventListener('click', async () => {
+      const isMember = jb.dataset.member === 'true';
+      try {
+        await api('POST', `/api/squads/${s.id}/${isMember ? 'leave' : 'join'}`, { userId });
+        jb.dataset.member = String(!isMember);
+        jb.classList.toggle('joined', !isMember);
+        jb.textContent = !isMember ? 'Joined' : 'Join';
+        showToast(!isMember ? `Joined ${s.name}` : `Left ${s.name}`);
+      } catch (e) { showToast(e.message); }
+    });
+    sqEl.appendChild(row);
+  });
+
+  const ncEl = wrap.querySelector('#newcomers');
+  if (!newcomers.length) ncEl.appendChild(el('<div class="muted-note">No new members this week.</div>'));
+  newcomers.forEach((n) => {
+    const row = el(`<div class="list-row"><div class="lr-main"><div class="nm">${escapeHtml(n.display_name)}</div>
+      <div class="meta">joined ${timeAgo(n.joined_at)}</div></div><button class="pill-btn welcome-btn">👋 Welcome</button></div>`);
+    row.querySelector('.welcome-btn').addEventListener('click', (e) => {
+      showToast(`Welcome sent to ${n.display_name} 👋`); e.currentTarget.textContent = 'Welcomed ✓'; e.currentTarget.disabled = true;
+    });
+    ncEl.appendChild(row);
+  });
+
+  wrap.querySelector('#giveShout').addEventListener('click', () =>
+    openShoutComposer(wrap.querySelector('#shoutComposer'), members));
+}
+
+function openShoutComposer(container, members) {
+  if (container.dataset.open === '1') { container.innerHTML = ''; container.dataset.open = '0'; return; }
+  container.dataset.open = '1';
+  container.innerHTML = '';
+  const c = el(`
+    <div class="card">
+      <label class="field"><span class="lbl">Shout out a teammate</span>
+        <input list="shoutMembers" id="shoutTo" placeholder="Who pushed you?" autocomplete="off" />
+        <datalist id="shoutMembers">${members.filter((m) => m.user_id !== userId)
+          .map((m) => `<option value="${escapeAttr(m.display_name)}"></option>`).join('')}</datalist></label>
+      <label class="field"><span class="lbl">Message</span>
+        <input type="text" id="shoutText" placeholder="thanks for pushing me through Murph!" /></label>
+      <button class="btn-primary" id="postShout">Post shout-out 🙌</button>
+      <div class="error" id="shoutErr"></div>
+    </div>`);
+  container.appendChild(c);
+  c.querySelector('#postShout').addEventListener('click', async () => {
+    const err = c.querySelector('#shoutErr'); err.textContent = '';
+    const toName = c.querySelector('#shoutTo').value.trim();
+    const text = c.querySelector('#shoutText').value.trim();
+    const m = members.find((x) => x.display_name === toName);
+    if (!m) { err.textContent = 'Pick a teammate from the list.'; return; }
+    if (!text) { err.textContent = 'Add a short message.'; return; }
+    try {
+      await api('POST', '/api/shoutout', { fromUserId: userId, toUserId: m.user_id, text });
+      showToast('Shout-out posted 🙌'); container.innerHTML = ''; container.dataset.open = '0';
+    } catch (e) { err.textContent = e.message; }
+  });
+}
+
+async function renderSquadDetail(squadId) {
+  setScreenName('Squad');
+  content.innerHTML = '<p class="subtitle">Loading…</p>';
+  let w, board, quiet, feed;
+  try {
+    w = await ensureWorkout();
+    [board, quiet, feed] = await Promise.all([
+      api('GET', `/api/squads/${squadId}/leaderboard/${w.workout_id}`),
+      api('GET', `/api/squads/${squadId}/quiet`).then((r) => r.members),
+      api('GET', `/api/squads/${squadId}/feed`).then((r) => r.events),
+    ]);
+  } catch (e) { content.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+
+  content.innerHTML = '';
+  const wrap = el(`
+    <div>
+      <button class="back-link" id="back">← Community</button>
+      <h1 class="title">${escapeHtml(board.squad.name)}</h1>
+      <p class="subtitle">Squad · ${escapeHtml(w.name)} today</p>
+      <div class="sec-title">Squad leaderboard</div><div id="board"></div>
+      ${quiet.length ? '<div class="sec-title">💪 Cheer on your squad</div><div id="quiet"></div>' : ''}
+      <div class="sec-title">Squad feed</div><div id="feed"></div>
+    </div>
+  `);
+  content.appendChild(wrap);
+
+  const bEl = wrap.querySelector('#board');
+  if (!board.results.length) bEl.appendChild(el(`<div class="muted-note">No one in this squad has logged ${escapeHtml(w.name)} today.</div>`));
+  board.results.forEach((r, i) => {
+    const me = r.user_id === userId;
+    bEl.appendChild(el(`
+      <div class="lb-row ${me ? 'me' : ''}">
+        <div class="lb-rank">${i + 1}</div>
+        <div class="lb-main"><div class="lb-name">${escapeHtml(r.display_name)}${me ? ' · you' : ''}</div>
+          <div class="lb-sub">${Math.round(r.rom_pct)}% ROM · ${r.unbroken_sets} unbroken</div></div>
+        <div class="lb-score"><div class="s">${num(r.holistic_score)}</div><div class="t">${fmtTime(r.time_seconds)}</div></div>
+      </div>`));
+  });
+
+  const qEl = wrap.querySelector('#quiet');
+  if (qEl) quiet.forEach((m) => {
+    const row = el(`<div class="list-row"><div class="lr-main"><div class="nm">${escapeHtml(m.display_name)}</div>
+      <div class="meta">${m.days_since == null ? 'hasn’t logged yet' : 'quiet ' + m.days_since + ' days'}</div></div>
+      <button class="pill-btn nudge-btn">💪 Send a push</button></div>`);
+    row.querySelector('.nudge-btn').addEventListener('click', (e) => {
+      showToast(`Push sent to ${m.display_name} 💪`); e.currentTarget.textContent = 'Pushed ✓'; e.currentTarget.disabled = true;
+    });
+    qEl.appendChild(row);
+  });
+
+  const fEl = wrap.querySelector('#feed');
+  if (!feed.length) fEl.appendChild(el('<div class="muted-note">No squad activity yet.</div>'));
+  feed.forEach((ev) => fEl.appendChild(feedItemEl(ev)));
+
+  wrap.querySelector('#back').addEventListener('click', () => setView('community'));
+}
+
+function renderCircleInto(container) {
   const posts = communitySpace === 'all'
     ? COMMUNITY_POSTS
     : COMMUNITY_POSTS.filter((p) => p.space === communitySpace);
 
+  container.innerHTML = '';
   const wrap = el(`
     <div>
       <!-- MOCK: Circle.so embed chrome. Real version is an iframe to
@@ -966,12 +1197,12 @@ function renderCommunity() {
       <div id="posts"></div>
     </div>
   `);
-  content.appendChild(wrap);
+  container.appendChild(wrap);
 
   // Space switcher
   wrap.querySelector('#spaceChips').addEventListener('click', (e) => {
     const b = e.target.closest('button[data-space]'); if (!b) return;
-    communitySpace = b.dataset.space; renderCommunity();
+    communitySpace = b.dataset.space; renderCircleInto(container);
   });
 
   // New post / replies are mock entry points into Circle.
@@ -1046,9 +1277,13 @@ async function renderOwner() {
 async function renderOwnerHome() {
   setScreenName('Dashboard');
   content.innerHTML = '<p class="subtitle">Loading…</p>';
-  let d;
-  try { d = await api('GET', `/api/owner/box/${ownerBox.box_id}/dashboard`); }
-  catch (e) { content.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+  let d, goal;
+  try {
+    [d, goal] = await Promise.all([
+      api('GET', `/api/owner/box/${ownerBox.box_id}/dashboard`),
+      api('GET', `/api/box/${ownerBox.box_id}/team-goal`).then((r) => r.goal).catch(() => null),
+    ]);
+  } catch (e) { content.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
 
   const p = d.participation, r = d.rank;
   content.innerHTML = '';
@@ -1077,6 +1312,8 @@ async function renderOwnerHome() {
           : 'Top of the standings 🏆'}</div>
         <button class="btn-outline" id="toCompete">View competition →</button>
       </div>` : ''}
+
+      ${goal ? `<div class="sec-title">🎯 Team goal</div>${teamGoalCardHtml(goal)}` : ''}
 
       <div class="sec-title danger-title">⚠ Members going quiet</div>
       <div id="churn"></div>

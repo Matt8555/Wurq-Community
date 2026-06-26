@@ -87,12 +87,39 @@ one file so they are easy to tune.
 | GET | `/api/athlete/:userId/history` | Reverse-chron session list. |
 | GET | `/api/athlete/:userId/session/:resultId` | Full session detail + score breakdown + movements. |
 | GET | `/api/athlete/:userId/profile` | Profile bundle: summary, PRs, trend, heatmap, workload, comparison percentiles, benchmark histories. |
+| GET | `/api/box/:boxId/team-goal` | Active collective goal with live progress, contributors, top contributors. |
+| GET | `/api/box/:boxId/squads?userId=` | Squads in a box (member counts + whether the user is in each). |
+| GET | `/api/users/:userId/squads` | Squads a user belongs to. |
+| POST | `/api/squads` · `/api/squads/:id/join` · `/api/squads/:id/leave` | Create / join / leave a squad. |
+| GET | `/api/squads/:id/leaderboard/:workoutId` · `/api/squads/:id/feed` · `/api/squads/:id/quiet` | Squad mini-leaderboard, feed, and quiet members. |
+| POST | `/api/shoutout` | Post a shout-out crediting a teammate (writes a `shoutout` feed event). |
+| GET | `/api/box/:boxId/newcomers` · `/api/box/:boxId/members` | New-this-week members; box member list. |
 | GET | `/api/boxes` | List boxes (id, name, location, member count). |
 | GET | `/api/workouts` | List workouts (for the challenge WOD picker). |
 | GET | `/api/owner/box/:boxId/dashboard` | Owner dashboard: participation, box-vs-box rank + rival gap, churn-risk members (quiet 10+ days), hot streaks. |
 | POST | `/api/challenges` | Create a throwdown (`challengerBoxId`, `opponentBoxId`, `workoutId`, `startsAt`, `endsAt`). |
 | GET | `/api/challenges/box/:boxId` | List a box's challenges (as challenger or opponent). |
 | GET | `/api/challenges/:id/standing` | Head-to-head: each box's avg score × participation for the challenge WOD, within the window. |
+
+## Community & engagement
+
+The **Community** tab has two sub-tabs: **Community** (the engagement hub) and
+**Circle** (the embedded Circle.so mock). The hub is group-identity focused:
+
+- **Team goal** (centerpiece) — a collective box goal (e.g. "1700 / 1710
+  workouts") with a live progress bar, days remaining, contributor count, and
+  top contributors. Every logged workout ticks it up (shown on the log screen
+  and the owner dashboard).
+- **Squads** — small groups inside a box (e.g. "5am Crew", "Masters Athletes").
+  Join/leave, and open a squad for its own mini-leaderboard + mini-feed.
+- **Peer nudges** — on quiet squad-mates, a "Send a push" (encouraging, mocked).
+- **Shout-outs** — public gratitude crediting a teammate; stored as a `shoutout`
+  feed event and shown prominently in the feed.
+- **Welcome** — "new this week" members with a one-tap welcome (mocked).
+
+Engagement data is seeded from the existing population (squads per box, an active
+team goal per box, shout-outs, and a couple of new members) so no surface is
+empty.
 
 ## Owner view
 

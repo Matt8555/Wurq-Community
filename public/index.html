@@ -503,6 +503,37 @@
     .pr-celebrate .pc-msg { font-weight: 700; margin-top: 6px; }
     @keyframes burst { 0% { transform: scale(.2) rotate(-12deg); opacity: 0; } 60% { transform: scale(1.25) rotate(8deg); } 100% { transform: scale(1) rotate(0); opacity: 1; } }
 
+    /* ── Community engagement layer ───────────────────────────────────────── */
+    .goal-card {
+      background: linear-gradient(135deg, var(--acid-dim), var(--surface));
+      border: 1px solid var(--acid); border-radius: 16px; padding: 16px; margin-bottom: 16px;
+    }
+    .goal-head { display: flex; align-items: center; justify-content: space-between; }
+    .goal-title { font-weight: 800; letter-spacing: 0.02em; }
+    .goal-days { font-size: 0.72rem; color: var(--muted); }
+    .goal-metric { font-size: 2.1rem; font-weight: 800; color: var(--acid); margin: 8px 0 10px; line-height: 1; }
+    .goal-metric .goal-of { font-size: 0.95rem; font-weight: 600; color: var(--muted); }
+    .goal-bar { height: 12px; border-radius: 999px; background: var(--surface-2); overflow: hidden; border: 1px solid var(--border); }
+    .goal-bar span { display: block; height: 100%; background: var(--acid); border-radius: 999px; transition: width .5s ease; }
+    .goal-sub { margin-top: 10px; font-size: 0.85rem; color: var(--chalk); }
+    .goal-sub b { color: var(--acid); }
+    .goal-top { margin-top: 4px; font-size: 0.78rem; color: var(--muted); }
+    .goal-tick { margin-top: 14px; text-align: center; color: var(--acid); font-weight: 700; font-size: 0.9rem;
+      background: var(--acid-dim); border: 1px solid var(--acid); border-radius: 999px; padding: 8px 12px; }
+
+    .squad-row { display: flex; align-items: center; justify-content: space-between; gap: 10px;
+      background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; margin-bottom: 8px; }
+    .squad-main { flex: 1; min-width: 0; cursor: pointer; }
+    .squad-main .nm { font-weight: 700; font-size: 0.95rem; }
+    .squad-main .meta { color: var(--muted); font-size: 0.76rem; margin-top: 2px; }
+    .squad-join { flex: none; background: var(--acid); color: #10130a; border: none; border-radius: 999px;
+      padding: 8px 16px; font-weight: 800; font-size: 0.8rem; cursor: pointer; }
+    .squad-join.joined { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+
+    .pill-btn { flex: none; background: transparent; color: var(--acid); border: 1px solid var(--acid);
+      border-radius: 999px; padding: 7px 13px; font-size: 0.78rem; font-weight: 700; cursor: pointer; }
+    .pill-btn:disabled { color: var(--muted); border-color: var(--border); }
+
     .hidden { display: none !important; }
   </style>
 </head>

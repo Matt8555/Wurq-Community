@@ -246,6 +246,10 @@ async function ensureDemoAthlete(p, idx = 0) {
     const uid = await upsertUser(client, email);
     await upsertProfile(client, uid, { display_name: a.name, gym_name: HOME_BOX, exp: a.exp });
     await joinBox(client, uid, boxId);
+    // Ensure the demo login is in a squad so the Squads section is populated.
+    const sq = await client.query('SELECT id FROM squads WHERE box_id = $1 ORDER BY created_at LIMIT 1', [boxId]);
+    if (sq.rows[0]) await client.query(
+      'INSERT INTO squad_members (squad_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [sq.rows[0].id, uid]);
 
     const rows = [];
     for (const r of a.results) {
@@ -353,6 +357,9 @@ async function main() {
     // Reset the world (deterministic rebuild). FK-safe order.
     await client.query('DELETE FROM feed_events');
     await client.query('DELETE FROM user_badges');
+    await client.query('DELETE FROM squad_members');
+    await client.query('DELETE FROM team_goals');
+    await client.query('DELETE FROM squads');
     await client.query('DELETE FROM challenges');
     await client.query('DELETE FROM results');
     await client.query('DELETE FROM box_memberships');
@@ -474,6 +481,91 @@ async function main() {
     ];
     await bulkInsert(client, 'challenges',
       ['challenger_box_id', 'opponent_box_id', 'workout_id', 'starts_at', 'ends_at', 'status'], chRows);
+
+    // ---- Engagement layer: squads, team goals, shout-outs, newcomers --------
+    const SQUAD_NAMES = ['5am Crew', 'Masters Athletes', 'Weekend Warriors', 'Barbell Club', 'Engine Room', 'Comp Team'];
+    const firstSquadByBox = {};
+    for (const box of BOX_DEFS) {
+      const boxId = boxIds[box.name];
+      const roster = athletes.filter((a) => a.boxName === box.name);
+      const nSquads = 3 + (frng() < 0.5 ? 1 : 0);
+      for (let s = 0; s < nSquads; s++) {
+        const name = SQUAD_NAMES[(s + BOX_DEFS.indexOf(box)) % SQUAD_NAMES.length];
+        const sq = await client.query(
+          `INSERT INTO squads (box_id, name, created_at) VALUES ($1, $2, $3) RETURNING id`,
+          [boxId, name, ts(DAYS - 1)]);
+        const squadId = sq.rows[0].id;
+        if (s === 0) firstSquadByBox[box.name] = squadId;
+        const shuffled = roster.slice().sort(() => frng() - 0.5);
+        const members = shuffled.slice(0, 12 + Math.floor(frng() * 8));
+        const mRows = members.map((m) => [squadId, m.userId, ts(DAYS - 1 - Math.floor(frng() * 12))]);
+        await bulkInsert(client, 'squad_members', ['squad_id', 'user_id', 'joined_at'], mRows,
+          'ON CONFLICT (squad_id, user_id) DO NOTHING');
+      }
+    }
+    // Guarantee the demo logins are in a squad so "your squads" is never empty.
+    for (const p of DEMO_ATHLETES) {
+      const a = athletes.find((x) => x.email === p.email);
+      const sid = firstSquadByBox[p.boxName || HOME_BOX] || firstSquadByBox[HOME_BOX];
+      if (a && sid) await client.query(
+        `INSERT INTO squad_members (squad_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [sid, a.userId]);
+    }
+
+    // Team goal per box — mostly complete so it looks exciting. current is
+    // computed live by the API; here we set a target just above the real count.
+    const GOAL_TYPES = ['total_workouts', 'total_holistic_points', 'participation_days'];
+    for (const box of BOX_DEFS) {
+      const boxId = boxIds[box.name];
+      const type = box.name === HOME_BOX ? 'total_workouts' : GOAL_TYPES[BOX_DEFS.indexOf(box) % 3];
+      const metric = type === 'total_holistic_points' ? 'COALESCE(SUM(r.holistic_score),0)'
+        : type === 'participation_days' ? 'COUNT(DISTINCT (r.user_id, r.created_at::date))' : 'COUNT(*)';
+      const cur = Math.round(Number((await client.query(
+        `SELECT ${metric} AS n FROM results r JOIN box_memberships m ON m.user_id = r.user_id WHERE m.box_id = $1`,
+        [boxId])).rows[0].n));
+      const roundTo = type === 'total_holistic_points' ? 500 : 5;
+      const pad = type === 'total_holistic_points' ? 300 + Math.floor(frng() * 600) : 8 + Math.floor(frng() * 16);
+      const target = Math.ceil((cur + pad) / roundTo) * roundTo;
+      await client.query(
+        `INSERT INTO team_goals (box_id, type, target, current, starts_at, ends_at, status)
+           VALUES ($1, $2, $3, $4, $5, $6, 'active')`,
+        [boxId, type, target, cur, ts(DAYS - 1), `${dayStr(-4)} 12:00:00`]);
+    }
+
+    // Shout-outs — public gratitude, seeded into box feeds.
+    const SHOUT = [
+      (t) => `huge thanks to @${t} for pushing me through today 🙌`,
+      (t) => `couldn't have hit that PR without @${t}!`,
+      (t) => `@${t} set the pace today — chasing you made me better`,
+      (t) => `grateful for @${t}'s spot on the heavy sets 💪`,
+    ];
+    const shoutRows = [];
+    for (const box of BOX_DEFS) {
+      const roster = athletes.filter((a) => a.boxName === box.name);
+      for (let i = 0; i < 2; i++) {
+        const from = roster[Math.floor(frng() * roster.length)];
+        const to = roster[Math.floor(frng() * roster.length)];
+        if (!from || !to || from === to) continue;
+        shoutRows.push([from.userId, 'shoutout',
+          JSON.stringify({ to_user_id: to.userId, to_name: to.name, text: SHOUT[i % SHOUT.length](to.name.split(' ')[0]), seed: 'true' }),
+          3 + Math.floor(frng() * 12), ts(Math.floor(frng() * 4))]);
+      }
+    }
+    await bulkInsert(client, 'feed_events', ['user_id', 'type', 'payload', 'kudos', 'created_at'], shoutRows);
+
+    // Newcomers — "new this week" members (recent join, no results yet).
+    for (const box of BOX_DEFS) {
+      const boxId = boxIds[box.name];
+      for (let i = 0; i < 2; i++) {
+        const name = `${FIRST[(i * 9 + BOX_DEFS.indexOf(box) * 3) % FIRST.length]} ${LAST[(i * 7 + 2) % LAST.length]}`;
+        const uid = await upsertUser(client, `new${i}.${slug(box.name)}@wurqdemo.io`);
+        await upsertProfile(client, uid, { display_name: name, gym_name: box.name, exp: 'beginner' });
+        await client.query(
+          `INSERT INTO box_memberships (user_id, box_id, joined_at)
+             VALUES ($1, $2, now() - ($3 || ' days')::interval)
+             ON CONFLICT (user_id, box_id) DO UPDATE SET joined_at = EXCLUDED.joined_at`,
+          [uid, boxId, String(1 + i)]);
+      }
+    }
 
     await client.query('COMMIT');
   } catch (e) {

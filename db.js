@@ -147,6 +147,36 @@ const SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_challenges_challenger ON challenges(challenger_box_id);
   CREATE INDEX IF NOT EXISTS idx_challenges_opponent   ON challenges(opponent_box_id);
+
+  -- Engagement layer: squads (small groups in a box) + collective team goals.
+  CREATE TABLE IF NOT EXISTS squads (
+    id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    box_id     UUID NOT NULL REFERENCES boxes(box_id) ON DELETE CASCADE,
+    name       TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS idx_squads_box ON squads(box_id);
+
+  CREATE TABLE IF NOT EXISTS squad_members (
+    squad_id  UUID NOT NULL REFERENCES squads(id) ON DELETE CASCADE,
+    user_id   UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    joined_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (squad_id, user_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_squad_members_squad ON squad_members(squad_id);
+  CREATE INDEX IF NOT EXISTS idx_squad_members_user  ON squad_members(user_id);
+
+  CREATE TABLE IF NOT EXISTS team_goals (
+    id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    box_id    UUID NOT NULL REFERENCES boxes(box_id) ON DELETE CASCADE,
+    type      TEXT NOT NULL,                 -- total_workouts | total_holistic_points | participation_days
+    target    NUMERIC NOT NULL,
+    current   NUMERIC NOT NULL DEFAULT 0,    -- seed snapshot; live value is computed
+    starts_at TIMESTAMPTZ NOT NULL,
+    ends_at   TIMESTAMPTZ NOT NULL,
+    status    TEXT NOT NULL DEFAULT 'active'
+  );
+  CREATE INDEX IF NOT EXISTS idx_team_goals_box ON team_goals(box_id);
 `;
 
 // Idempotent fixups for databases created by earlier versions of this app:
