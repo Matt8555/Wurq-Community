@@ -189,7 +189,8 @@ function renderProfile() {
   setScreenName('Profile');
   if (!userId) return renderEmailGate();
   if (!profile) { content.innerHTML = '<p class="subtitle">Loading…</p>'; return loadProfile(); }
-  renderProfileForm();
+  if (!profile.profile_complete) return renderProfileForm(); // onboarding
+  return renderRichProfile();
 }
 
 function renderEmailGate() {
@@ -238,6 +239,7 @@ function renderProfileForm() {
   content.innerHTML = '';
   content.appendChild(el(`
     <div>
+      ${onboarding ? '' : '<button class="back-link" id="backToProfile">← Back to profile</button>'}
       <h1 class="title">${onboarding ? 'Set up your profile' : 'Profile settings'}</h1>
       <p class="subtitle">${onboarding
         ? 'Tell the community who you are. You can change any of this later.'
@@ -338,18 +340,232 @@ function renderProfileForm() {
     try {
       profile = await api('PUT', `/api/profile/${userId}`, payload);
       showToast('Saved ✓');
-      renderProfileForm();
+      renderProfile(); // -> rich profile once complete
     } catch (e) {
       err.textContent = e.message;
       btn.disabled = false; btn.textContent = onboarding ? 'Create profile' : 'Save changes';
     }
   });
 
+  const back = content.querySelector('#backToProfile');
+  if (back) back.addEventListener('click', () => renderRichProfile());
+
   content.querySelector('#reset').addEventListener('click', () => {
     localStorage.removeItem(STORAGE_KEY);
     userId = null; profile = null;
     setView('profile');
   });
+}
+
+// ---- Rich athlete profile ---------------------------------------------------
+function svgLineChart(series, h = 96) {
+  if (!series || series.length < 2) return '<div class="muted-note">Not enough sessions yet.</div>';
+  const w = 320, ys = series.map((p) => p.score);
+  const lo = Math.max(0, Math.floor(Math.min(...ys) - 3)), hi = Math.min(100, Math.ceil(Math.max(...ys) + 3));
+  const range = Math.max(1, hi - lo);
+  const px = (i) => (i / (series.length - 1)) * (w - 8) + 4;
+  const py = (v) => h - 8 - ((v - lo) / range) * (h - 18);
+  const pts = series.map((p, i) => `${px(i).toFixed(1)},${py(p.score).toFixed(1)}`).join(' ');
+  const last = series[series.length - 1];
+  return `<svg class="linechart" viewBox="0 0 ${w} ${h}" width="100%" height="${h}">
+    <polygon points="4,${h - 8} ${pts} ${w - 4},${h - 8}" fill="rgba(198,255,0,0.12)"/>
+    <polyline points="${pts}" fill="none" stroke="var(--acid)" stroke-width="2.2" stroke-linejoin="round"/>
+    <circle cx="${px(series.length - 1).toFixed(1)}" cy="${py(last.score).toFixed(1)}" r="3.5" fill="var(--acid)"/>
+  </svg>`;
+}
+function heatmapHtml(cells) {
+  return `<div class="heat">${cells.map((c) => {
+    const on = c.score > 0;
+    const a = on ? (0.2 + 0.8 * Math.min(1, Math.max(0, (c.score - 60) / 40))) : 0;
+    const bg = on ? `rgba(198,255,0,${a.toFixed(2)})` : 'var(--surface-2)';
+    return `<span class="heat-cell" style="background:${bg}" title="${c.date}${on ? ' · ' + c.score : ' · rest'}"></span>`;
+  }).join('')}</div>`;
+}
+function barsHtml(items) {
+  if (!items.length) return '<div class="muted-note">No workload data yet.</div>';
+  const max = Math.max(...items.map((i) => i.reps), 1);
+  return items.map((i) => `<div class="wl-row"><div class="wl-lab">${escapeHtml(i.category)}</div>
+    <div class="wl-bar"><span style="width:${Math.round(100 * i.reps / max)}%"></span></div>
+    <div class="wl-val">${i.pct}%</div></div>`).join('');
+}
+function sparkTimes(history) {
+  const w = 96, h = 30, ts = history.map((x) => x.time);
+  const min = Math.min(...ts), max = Math.max(...ts), range = Math.max(1, max - min);
+  const px = (i) => (i / (history.length - 1)) * (w - 4) + 2;
+  const py = (v) => 3 + ((v - min) / range) * (h - 6); // lower time -> higher on chart
+  const pts = history.map((x, i) => `${px(i).toFixed(1)},${py(x.time).toFixed(1)}`).join(' ');
+  return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}"><polyline points="${pts}" fill="none" stroke="var(--acid)" stroke-width="2"/></svg>`;
+}
+
+async function renderRichProfile() {
+  setScreenName('Profile');
+  content.innerHTML = '<p class="subtitle">Loading…</p>';
+  let d, sessions;
+  try {
+    [d, sessions] = await Promise.all([
+      api('GET', `/api/athlete/${userId}/profile`),
+      api('GET', `/api/athlete/${userId}/history`).then((r) => r.sessions),
+    ]);
+  } catch (e) { content.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+
+  const u = d.user, s = d.summary, prs = d.prs, cmp = d.comparison;
+  const avatar = u.avatar_url;
+  const header = `
+    <div class="prof-head">
+      <div class="avatar ${avatar ? 'has-img' : ''}" style="width:64px;height:64px">
+        ${avatar ? `<img src="${escapeAttr(avatar)}" alt="" style="width:100%;height:100%;object-fit:cover"/>` : initials(u.display_name)}
+      </div>
+      <div class="prof-id">
+        <div class="prof-name">${escapeHtml(u.display_name || 'Athlete')}</div>
+        <div class="prof-sub">${escapeHtml(u.gym_name || 'No box')}${u.experience_level ? ' · ' + labelFor(u.experience_level) : ''}</div>
+      </div>
+      <button class="edit-btn" id="editProfile">Edit</button>
+    </div>`;
+
+  if (!s.sessions_total) {
+    content.innerHTML = '';
+    content.appendChild(el(`<div>${header}
+      <div class="empty">No training history yet.<br/>Log today's WOD to start building your record.</div>
+      <button class="btn-primary" id="goLog">Log today's WOD</button></div>`));
+    content.querySelector('#editProfile').addEventListener('click', () => renderProfileForm());
+    content.querySelector('#goLog').addEventListener('click', () => setView('log'));
+    return;
+  }
+
+  const delta = (s.this_week_avg != null && s.last_week_avg != null) ? Math.round((s.this_week_avg - s.last_week_avg) * 10) / 10 : null;
+  const fran = prs.fastest.find((f) => f.name === 'Fran');
+  const streakLine = s.trained_today
+    ? `🔥 ${s.current_streak}-day streak`
+    : (s.current_streak > 0 ? `🔥 ${s.current_streak}-day streak — train today to keep it!` : 'Start a streak today');
+
+  content.innerHTML = '';
+  const wrap = el(`
+    <div>
+      ${header}
+
+      <div class="fitter">
+        <div>
+          <div class="fitter-lab">This week's avg score</div>
+          <div class="fitter-val">${s.this_week_avg ?? '—'}
+            ${delta != null ? `<span class="delta ${delta >= 0 ? 'up' : 'down'}">${delta >= 0 ? '▲' : '▼'} ${Math.abs(delta)}</span>` : ''}</div>
+        </div>
+        <div class="fitter-note">${delta != null && delta >= 0 ? "You're getting fitter 💪" : (delta != null ? 'Keep grinding' : 'Build your baseline')}<br/>vs last week ${s.last_week_avg ?? '—'}</div>
+      </div>
+
+      <div class="sec-title">★ Personal Records</div>
+      <div class="pr-grid">
+        <div class="pr-card"><div class="pr-v">${prs.best_holistic ? prs.best_holistic.score : '—'}</div><div class="pr-l">Best Holistic${prs.best_holistic ? ' · ' + escapeHtml(prs.best_holistic.name) : ''}</div></div>
+        <div class="pr-card"><div class="pr-v">${fran ? fmtTime(fran.time) : '—'}</div><div class="pr-l">Fastest Fran</div></div>
+        <div class="pr-card"><div class="pr-v">${prs.highest_power ? Math.round(prs.highest_power.power) + 'W' : '—'}</div><div class="pr-l">Top Power</div></div>
+        <div class="pr-card"><div class="pr-v">${prs.longest_streak}d</div><div class="pr-l">Longest Streak</div></div>
+      </div>
+
+      <div class="sec-title">🔥 Streak & consistency</div>
+      <div class="card">
+        <div class="streak-line">${streakLine}</div>
+        ${heatmapHtml(d.heatmap)}
+        <div class="heat-legend"><span>35 days</span><span>less</span><span class="lg lg1"></span><span class="lg lg2"></span><span class="lg lg3"></span><span>more</span></div>
+      </div>
+
+      <div class="sec-title">📈 Progress — Holistic Score</div>
+      <div class="card">${svgLineChart(d.trend)}</div>
+
+      <div class="sec-title">🏋 Workload this month</div>
+      <div class="card">${barsHtml(d.workload)}</div>
+
+      <div class="sec-title">🏆 How am I doing</div>
+      <div class="cmp-grid">
+        ${cmp.box ? `<div class="cmp-card"><div class="cmp-v">Top ${cmp.box.top_pct}%</div><div class="cmp-l">in your box</div></div>` : ''}
+        ${cmp.exp ? `<div class="cmp-card"><div class="cmp-v">${cmp.exp.beats_pct}%</div><div class="cmp-l">of ${escapeHtml(labelFor(cmp.exp.level))} you beat</div></div>` : ''}
+        ${cmp.fran ? `<div class="cmp-card"><div class="cmp-v">${cmp.fran.beats_pct}%</div><div class="cmp-l">of ${escapeHtml(labelFor(cmp.fran.level))} beat at Fran</div></div>` : ''}
+      </div>
+
+      ${d.benchmarks.length ? `<div class="sec-title">📊 Benchmark tracking</div><div id="benches"></div>` : ''}
+
+      <div class="sec-title">🗒 Recent sessions</div>
+      <div id="sessions"></div>
+
+      <div class="center" style="margin-top:16px"><button class="link" id="reset2">Not you? Start over</button></div>
+    </div>
+  `);
+  content.appendChild(wrap);
+
+  const benchEl = wrap.querySelector('#benches');
+  if (benchEl) d.benchmarks.forEach((b) => {
+    const hist = b.history;
+    const best = hist.reduce((m, x) => (x.time < m.time ? x : m), hist[0]);
+    const latest = hist[hist.length - 1];
+    benchEl.appendChild(el(`
+      <div class="bench-row">
+        <div class="bench-main"><div class="nm">${escapeHtml(b.name)}</div>
+          <div class="meta">best ${fmtTime(best.time)} · latest ${fmtTime(latest.time)} · ${hist.length}×</div></div>
+        <div class="bench-spark">${sparkTimes(hist)}</div>
+      </div>`));
+  });
+
+  const sessEl = wrap.querySelector('#sessions');
+  sessions.slice(0, 14).forEach((x) => {
+    const row = el(`
+      <div class="sess-row" data-id="${x.result_id}">
+        <div class="sess-main"><div class="nm">${escapeHtml(x.name)} <span class="sess-type">${escapeHtml(x.type || '')}</span></div>
+          <div class="meta">${fmtDate(x.wod_date)} · ${fmtTime(x.time_seconds)}</div></div>
+        <div class="sess-score">${x.holistic_score}</div>
+      </div>`);
+    row.addEventListener('click', () => renderSession(x.result_id));
+    sessEl.appendChild(row);
+  });
+
+  wrap.querySelector('#editProfile').addEventListener('click', () => renderProfileForm());
+  wrap.querySelector('#reset2').addEventListener('click', () => {
+    localStorage.removeItem(STORAGE_KEY); userId = null; profile = null; setView('profile');
+  });
+}
+
+async function renderSession(resultId) {
+  setScreenName('Session');
+  content.innerHTML = '<p class="subtitle">Loading…</p>';
+  let s;
+  try { s = (await api('GET', `/api/athlete/${userId}/session/${resultId}`)).session; }
+  catch (e) { content.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+  const b = s.breakdown;
+  content.innerHTML = '';
+  content.appendChild(el(`
+    <div>
+      <button class="back-link" id="back">← Training history</button>
+      <h1 class="title">${escapeHtml(s.name)}</h1>
+      <p class="subtitle">${fmtDate(s.wod_date)} · ${escapeHtml(s.type || '')}</p>
+
+      <div class="card score-reveal">
+        <div class="num">${s.holistic_score}</div>
+        <div class="cap">Holistic Score</div>
+        <div class="brk-row">
+          <span>time <b>${b.timeScore}</b></span>
+          <span>ROM <b>${Math.round(b.romFactor * 100)}%</b></span>
+          <span>pacing <b>${Math.round(b.pacingFactor * 100)}%</b></span>
+        </div>
+      </div>
+
+      <div class="metric-grid">
+        <div class="metric"><div class="m-v">${fmtTime(s.time_seconds)}</div><div class="m-l">Time</div></div>
+        <div class="metric"><div class="m-v">${s.avg_hr ?? '—'}</div><div class="m-l">Avg HR</div></div>
+        <div class="metric"><div class="m-v">${s.peak_hr ?? '—'}</div><div class="m-l">Peak HR</div></div>
+        <div class="metric"><div class="m-v">${s.calories ?? '—'}</div><div class="m-l">Calories</div></div>
+        <div class="metric"><div class="m-v">${s.power_output != null ? Math.round(s.power_output) + 'W' : '—'}</div><div class="m-l">Avg Power</div></div>
+        <div class="metric"><div class="m-v">${s.work_volume != null ? Math.round(s.work_volume) : '—'}</div><div class="m-l">Volume (kg)</div></div>
+      </div>
+
+      <div class="sec-title">Movement breakdown</div>
+      <div id="moves"></div>
+    </div>
+  `));
+  const movesEl = content.querySelector('#moves');
+  if (!s.movements.length) movesEl.appendChild(el('<div class="muted-note">No movement detail.</div>'));
+  s.movements.forEach((m) => movesEl.appendChild(el(`
+    <div class="move-row">
+      <div class="nm">${escapeHtml(m.movement)}</div>
+      <div class="move-meta">${m.reps} reps · ${m.rom_pct}% ROM</div>
+    </div>`)));
+  content.querySelector('#back').addEventListener('click', () => renderRichProfile());
 }
 
 // ---- WOD log ----------------------------------------------------------------
@@ -422,8 +638,8 @@ async function renderLog() {
       const resp = await api('POST', '/api/results', {
         userId, workoutId: w.workout_id, time_seconds, rom_pct, unbroken_sets,
       });
-      showToast('Logged ✓');
-      renderLogged(resp.result, w, resp.newBadges || []);
+      showToast(resp.prs && resp.prs.length ? 'New PR! 🎉' : 'Logged ✓');
+      renderLogged(resp.result, w, resp.newBadges || [], resp.prs || []);
     } catch (e) {
       err.textContent = e.message;
       btn.disabled = false; btn.textContent = 'Log result';
@@ -441,13 +657,20 @@ function countUp(node, target) {
   requestAnimationFrame(step);
 }
 
-function renderLogged(saved, w, newBadges) {
+function renderLogged(saved, w, newBadges, prs) {
+  prs = prs || [];
   const score = Number(saved.holistic_score);
   content.innerHTML = '';
   content.appendChild(el(`
     <div>
-      <h1 class="title">Nice work!</h1>
+      <h1 class="title">${prs.length ? 'New PR! 🎉' : 'Nice work!'}</h1>
       <p class="subtitle">${escapeHtml(w.name)} · ${fmtTime(saved.time_seconds)} · ${Math.round(saved.rom_pct)}% ROM</p>
+      ${prs.map((pr) => `
+        <div class="pr-celebrate">
+          <div class="pc-burst">🎉</div>
+          <div class="pc-title">Personal Record</div>
+          <div class="pc-msg">${escapeHtml(pr.message)}</div>
+        </div>`).join('')}
       <div class="card score-reveal">
         <div class="num" id="scoreNum">0</div>
         <div class="cap">Holistic Score</div>
@@ -574,6 +797,9 @@ function feedText(ev) {
   }
   if (ev.type === 'coach_post') {
     return `${name} <span class="role-tag">Coach</span><div class="feed-post">${escapeHtml(p.text || '')}</div>`;
+  }
+  if (ev.type === 'pr') {
+    return `${name} set a PR — <span class="accent">${escapeHtml(p.label || 'New PR')}</span> 🎉`;
   }
   return `${name} did something`;
 }

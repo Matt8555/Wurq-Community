@@ -4,8 +4,11 @@ const express = require('express');
 const path = require('path');
 const multer = require('multer');
 const { pool, migrate } = require('./db');
-const { computeHolisticScore } = require('./holisticScore');
+const { computeHolisticScore, computeBreakdown } = require('./holisticScore');
 const { evaluateBadges } = require('./badges');
+const { deriveMetrics } = require('./metrics');
+
+const BENCHMARKS = ['Fran', 'Helen', 'Grace', 'Cindy', 'Diane', 'Annie', 'Karen', 'Jackie', 'Isabel', 'Amanda', 'Elizabeth', 'Randy', 'Nancy'];
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -256,22 +259,49 @@ app.post('/api/results', wrap(async (req, res) => {
   const workout = workoutRow.rows[0];
 
   const holistic_score = computeHolisticScore({ time_seconds, rom_pct, unbroken_sets });
+  const metrics = deriveMetrics({ workoutName: workout.name, time_seconds, rom_pct, unbroken_sets });
+
+  // PR detection — compare against the athlete's PRIOR history (other workouts).
+  const prevBest = await pool.query(
+    `SELECT MAX(holistic_score)::float AS best_holistic,
+            MIN(r.time_seconds) FILTER (WHERE w.name = $3 AND r.workout_id <> $2)::int AS best_same
+       FROM results r JOIN workouts w ON w.workout_id = r.workout_id
+      WHERE r.user_id = $1 AND r.workout_id <> $2`,
+    [userId, workoutId, workout.name]);
+  const prevHolistic = prevBest.rows[0].best_holistic;
+  const prevSame = prevBest.rows[0].best_same;
+  const prs = [];
+  if (prevHolistic != null && holistic_score > prevHolistic) {
+    prs.push({ type: 'holistic', label: 'Best Holistic Score',
+      message: `New best Holistic Score: ${holistic_score} (+${Math.round((holistic_score - prevHolistic) * 10) / 10})`,
+      improvement: Math.round((holistic_score - prevHolistic) * 10) / 10 });
+  }
+  if (prevSame != null && time_seconds < prevSame && BENCHMARKS.includes(workout.name)) {
+    prs.push({ type: 'benchmark_time', label: `Fastest ${workout.name}`,
+      message: `You beat your ${workout.name} time by ${prevSame - time_seconds}s!`,
+      improvement: prevSame - time_seconds });
+  }
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
     const saved = await client.query(
-      `INSERT INTO results (user_id, workout_id, time_seconds, rom_pct, unbroken_sets, holistic_score)
-         VALUES ($1, $2, $3, $4, $5, $6)
+      `INSERT INTO results (user_id, workout_id, time_seconds, rom_pct, unbroken_sets, holistic_score,
+                            avg_hr, peak_hr, calories, power_output, work_volume, movements)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
          ON CONFLICT (user_id, workout_id) DO UPDATE SET
            time_seconds   = EXCLUDED.time_seconds,
            rom_pct        = EXCLUDED.rom_pct,
            unbroken_sets  = EXCLUDED.unbroken_sets,
            holistic_score = EXCLUDED.holistic_score,
-           created_at     = now()
+           avg_hr = EXCLUDED.avg_hr, peak_hr = EXCLUDED.peak_hr, calories = EXCLUDED.calories,
+           power_output = EXCLUDED.power_output, work_volume = EXCLUDED.work_volume,
+           movements = EXCLUDED.movements, created_at = now()
          RETURNING result_id, user_id, workout_id, time_seconds, rom_pct, unbroken_sets, holistic_score, created_at`,
-      [userId, workoutId, time_seconds, rom_pct, unbroken_sets, holistic_score]
+      [userId, workoutId, time_seconds, rom_pct, unbroken_sets, holistic_score,
+       metrics.avg_hr, metrics.peak_hr, metrics.calories, metrics.power_output, metrics.work_volume,
+       JSON.stringify(metrics.movements)]
     );
     const result = saved.rows[0];
 
@@ -287,10 +317,19 @@ app.post('/api/results', wrap(async (req, res) => {
        })]
     );
 
+    // A PR is its own celebratory feed event.
+    for (const pr of prs) {
+      await client.query(
+        `INSERT INTO feed_events (user_id, type, ref_id, payload)
+           VALUES ($1, 'pr', $2, $3)`,
+        [userId, result.result_id,
+         JSON.stringify({ workout_name: workout.name, label: pr.label, message: pr.message })]);
+    }
+
     const newBadges = await evaluateBadges(client, { userId, result, workout });
 
     await client.query('COMMIT');
-    res.status(201).json({ result, newBadges });
+    res.status(201).json({ result, newBadges, prs });
   } catch (e) {
     await client.query('ROLLBACK');
     throw e;
@@ -590,6 +629,162 @@ app.get('/api/challenges/:id/standing', wrap(async (req, res) => {
     },
     challenger: { box_id: ch.challenger_box_id, name: ch.challenger_name, ...challenger },
     opponent: { box_id: ch.opponent_box_id, name: ch.opponent_name, ...opponent },
+  });
+}));
+
+// ---- API: athlete training history + detail ---------------------------------
+const dminus = (str, n) => { const [y, m, d] = str.split('-').map(Number); return new Date(Date.UTC(y, m - 1, d - n)).toISOString().slice(0, 10); };
+const toDate = (v) => new Date(v).toISOString().slice(0, 10);
+
+app.get('/api/athlete/:userId/history', wrap(async (req, res) => {
+  const { userId } = req.params;
+  if (!isUuid(userId)) return res.status(400).json({ error: 'Invalid user id.' });
+  const { rows } = await pool.query(
+    `SELECT r.result_id, w.name, w.type, w.wod_date, r.holistic_score, r.time_seconds
+       FROM results r JOIN workouts w ON w.workout_id = r.workout_id
+      WHERE r.user_id = $1
+      ORDER BY w.wod_date DESC, r.created_at DESC`, [userId]);
+  res.json({ sessions: rows.map((r) => ({ ...r, wod_date: toDate(r.wod_date), holistic_score: Number(r.holistic_score) })) });
+}));
+
+app.get('/api/athlete/:userId/session/:resultId', wrap(async (req, res) => {
+  const { userId, resultId } = req.params;
+  if (!isUuid(userId) || !isUuid(resultId)) return res.status(400).json({ error: 'Invalid id.' });
+  const { rows } = await pool.query(
+    `SELECT r.result_id, r.time_seconds, r.rom_pct, r.unbroken_sets, r.holistic_score,
+            r.avg_hr, r.peak_hr, r.calories, r.power_output, r.work_volume, r.movements, r.created_at,
+            w.name, w.type, w.description, w.wod_date
+       FROM results r JOIN workouts w ON w.workout_id = r.workout_id
+      WHERE r.user_id = $1 AND r.result_id = $2`, [userId, resultId]);
+  if (!rows[0]) return res.status(404).json({ error: 'Session not found.' });
+  const s = rows[0];
+  res.json({
+    session: {
+      result_id: s.result_id, name: s.name, type: s.type, description: s.description,
+      wod_date: toDate(s.wod_date),
+      time_seconds: s.time_seconds, rom_pct: Number(s.rom_pct), unbroken_sets: s.unbroken_sets,
+      holistic_score: Number(s.holistic_score),
+      avg_hr: s.avg_hr, peak_hr: s.peak_hr, calories: s.calories,
+      power_output: s.power_output == null ? null : Number(s.power_output),
+      work_volume: s.work_volume == null ? null : Number(s.work_volume),
+      movements: s.movements || [],
+      breakdown: computeBreakdown({ time_seconds: s.time_seconds, rom_pct: Number(s.rom_pct), unbroken_sets: s.unbroken_sets }),
+    },
+  });
+}));
+
+// ---- API: athlete profile bundle (PRs, trends, streak, comparison, ...) ------
+app.get('/api/athlete/:userId/profile', wrap(async (req, res) => {
+  const { userId } = req.params;
+  if (!isUuid(userId)) return res.status(400).json({ error: 'Invalid user id.' });
+
+  const prof = await getProfileRow(userId);
+  if (!prof) return res.status(404).json({ error: 'User not found.' });
+
+  const todayStr = (await pool.query(`SELECT to_char(CURRENT_DATE, 'YYYY-MM-DD') AS d`)).rows[0].d;
+
+  const rowsRes = await pool.query(
+    `SELECT r.result_id, w.name, w.type, w.wod_date, r.holistic_score, r.time_seconds,
+            r.power_output, r.movements
+       FROM results r JOIN workouts w ON w.workout_id = r.workout_id
+      WHERE r.user_id = $1
+      ORDER BY w.wod_date ASC`, [userId]);
+  const R = rowsRes.rows.map((r) => ({
+    result_id: r.result_id, name: r.name, type: r.type, date: toDate(r.wod_date),
+    score: Number(r.holistic_score), time: r.time_seconds,
+    power: r.power_output == null ? 0 : Number(r.power_output), movements: r.movements || [],
+  }));
+
+  const dateSet = new Set(R.map((r) => r.date));
+  // current streak (counts from today, or yesterday if not trained today yet)
+  const trained_today = dateSet.has(todayStr);
+  let anchor = trained_today ? 0 : (dateSet.has(dminus(todayStr, 1)) ? 1 : null);
+  let current_streak = 0;
+  if (anchor !== null) { let i = anchor; while (dateSet.has(dminus(todayStr, i))) { current_streak++; i++; } }
+  // longest streak overall
+  const sortedDates = [...dateSet].sort();
+  let longest = 0, run = 0, prev = null;
+  for (const d of sortedDates) {
+    run = (prev && dminus(d, 1) === prev) ? run + 1 : 1;
+    longest = Math.max(longest, run); prev = d;
+  }
+
+  // heatmap: last 35 days, best score per day
+  const bestByDate = {};
+  for (const r of R) bestByDate[r.date] = Math.max(bestByDate[r.date] || 0, r.score);
+  const heatmap = [];
+  for (let i = 34; i >= 0; i--) { const d = dminus(todayStr, i); heatmap.push({ date: d, score: bestByDate[d] || 0 }); }
+
+  // trend (chronological session scores)
+  const trend = R.map((r) => ({ date: r.date, score: r.score }));
+
+  // weekly delta
+  const inRange = (d, a, b) => { for (let i = a; i < b; i++) if (dminus(todayStr, i) === d) return true; return false; };
+  const avgOf = (a, b) => { const xs = R.filter((r) => inRange(r.date, a, b)); return xs.length ? Math.round(xs.reduce((s, r) => s + r.score, 0) / xs.length * 10) / 10 : null; };
+  const this_week_avg = avgOf(0, 7), last_week_avg = avgOf(7, 14);
+
+  // workload by movement category
+  const cat = {};
+  for (const r of R) for (const m of r.movements) cat[m.cat] = (cat[m.cat] || 0) + (m.reps || 0);
+  const totalReps = Object.values(cat).reduce((s, n) => s + n, 0) || 1;
+  const workload = Object.entries(cat).map(([category, reps]) => ({ category, reps, pct: Math.round(100 * reps / totalReps) }))
+    .sort((a, b) => b.reps - a.reps);
+
+  // PRs
+  let bestH = null, bestP = null;
+  for (const r of R) {
+    if (!bestH || r.score > bestH.score) bestH = { score: r.score, name: r.name, date: r.date };
+    if (!bestP || r.power > bestP.power) bestP = { power: r.power, name: r.name, date: r.date };
+  }
+  const fastest = [];
+  const benchHistory = {};
+  for (const r of R) {
+    if (!BENCHMARKS.includes(r.name)) continue;
+    (benchHistory[r.name] = benchHistory[r.name] || { name: r.name, type: r.type, history: [] })
+      .history.push({ date: r.date, time: r.time, score: r.score });
+  }
+  for (const name of Object.keys(benchHistory)) {
+    const h = benchHistory[name].history;
+    const best = h.reduce((m, x) => (x.time < m.time ? x : m), h[0]);
+    fastest.push({ name, time: best.time, date: best.date });
+  }
+  fastest.sort((a, b) => a.name.localeCompare(b.name));
+  const benchmarks = Object.values(benchHistory).filter((b) => b.history.length >= 2);
+
+  // Comparison percentiles (box, experience level, Fran-vs-level)
+  async function pctl(sql, params) { const { rows } = await pool.query(sql, params); return rows[0]; };
+  let comparison = { box: null, exp: null, fran: null };
+  if (R.length && prof.box_id) {
+    const box = await pctl(
+      `WITH a AS (SELECT m.user_id, AVG(r.holistic_score) v FROM box_memberships m
+         JOIN results r ON r.user_id = m.user_id WHERE m.box_id = $1 GROUP BY m.user_id)
+       SELECT COUNT(*)::int total, COUNT(*) FILTER (WHERE v < (SELECT v FROM a WHERE user_id = $2))::int below FROM a`,
+      [prof.box_id, userId]);
+    comparison.box = { total: box.total, top_pct: box.total > 1 ? Math.max(1, Math.round(100 * (box.total - 1 - box.below) / (box.total - 1))) : 1 };
+
+    const lvl = prof.experience_level || 'RX';
+    const exp = await pctl(
+      `WITH a AS (SELECT r.user_id, AVG(r.holistic_score) v FROM results r
+         JOIN profiles p ON p.user_id = r.user_id WHERE p.experience_level = $1 GROUP BY r.user_id)
+       SELECT COUNT(*)::int total, COUNT(*) FILTER (WHERE v < (SELECT v FROM a WHERE user_id = $2))::int below FROM a`,
+      [lvl, userId]);
+    comparison.exp = { level: lvl, total: exp.total, beats_pct: exp.total > 1 ? Math.round(100 * exp.below / (exp.total - 1)) : 100 };
+
+    const fran = await pctl(
+      `WITH a AS (SELECT r.user_id, MIN(r.time_seconds) t FROM results r
+         JOIN workouts w ON w.workout_id = r.workout_id JOIN profiles p ON p.user_id = r.user_id
+         WHERE w.name = 'Fran' AND p.experience_level = $1 GROUP BY r.user_id)
+       SELECT (SELECT t FROM a WHERE user_id = $2) AS me, COUNT(*)::int total,
+              COUNT(*) FILTER (WHERE t > (SELECT t FROM a WHERE user_id = $2))::int slower FROM a`,
+      [lvl, userId]);
+    if (fran.me != null) comparison.fran = { level: lvl, total: fran.total, beats_pct: fran.total > 1 ? Math.round(100 * fran.slower / (fran.total - 1)) : 100 };
+  }
+
+  res.json({
+    user: { display_name: prof.display_name, gym_name: prof.gym_name, experience_level: prof.experience_level, avatar_url: prof.avatar_url, box_id: prof.box_id },
+    summary: { sessions_total: R.length, current_streak, trained_today, longest_streak: longest, this_week_avg, last_week_avg },
+    prs: { best_holistic: bestH, fastest, highest_power: bestP, longest_streak: longest },
+    heatmap, trend, workload, comparison, benchmarks,
   });
 }));
 

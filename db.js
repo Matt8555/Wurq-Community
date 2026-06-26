@@ -93,6 +93,13 @@ const SCHEMA_SQL = `
     rom_pct        NUMERIC(5,2),
     unbroken_sets  INTEGER,
     holistic_score NUMERIC(6,2),
+    -- Extra session metrics WurQ tracks (backfilled for seeded results).
+    avg_hr         INTEGER,
+    peak_hr        INTEGER,
+    calories       INTEGER,
+    power_output   NUMERIC(7,1),
+    work_volume    NUMERIC(9,1),
+    movements      JSONB NOT NULL DEFAULT '[]'::jsonb,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     -- One result per athlete per workout; re-logging updates the existing row.
     UNIQUE (user_id, workout_id)
@@ -158,6 +165,13 @@ const FIXUP_SQL = `
   END $$;
 
   ALTER TABLE feed_events ADD COLUMN IF NOT EXISTS kudos INTEGER NOT NULL DEFAULT 0;
+
+  ALTER TABLE results ADD COLUMN IF NOT EXISTS avg_hr       INTEGER;
+  ALTER TABLE results ADD COLUMN IF NOT EXISTS peak_hr      INTEGER;
+  ALTER TABLE results ADD COLUMN IF NOT EXISTS calories     INTEGER;
+  ALTER TABLE results ADD COLUMN IF NOT EXISTS power_output NUMERIC(7,1);
+  ALTER TABLE results ADD COLUMN IF NOT EXISTS work_volume  NUMERIC(9,1);
+  ALTER TABLE results ADD COLUMN IF NOT EXISTS movements    JSONB NOT NULL DEFAULT '[]'::jsonb;
 `;
 
 // Ensure there is a "Fran" workout for today (idempotent).
@@ -209,9 +223,11 @@ async function migrate() {
   await pool.query(FIXUP_SQL);
   await pool.query(SEED_WOD_SQL);
   await pool.query(SEED_BADGES_SQL);
-  await pool.query(MIGRATE_GYMS_SQL);
-  console.log('[db] migration complete (users, profiles, identities, boxes, memberships, ' +
-    'workouts, results, badges, user_badges, feed_events ready; Fran + badges seeded; gyms migrated)');
+  // NOTE: box memberships are managed by the seed and by PUT /api/profile (which
+  // syncs a user's box when they set their gym). We intentionally do NOT re-run a
+  // boot-time gym_name->membership migration here, as it would resurrect stale
+  // memberships the seed cleared. MIGRATE_GYMS_SQL is retained for one-off use.
+  console.log('[db] migration complete (schema ready; Fran + badges seeded)');
 }
 
 module.exports = { pool, migrate };

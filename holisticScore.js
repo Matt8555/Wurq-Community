@@ -44,4 +44,18 @@ function computeHolisticScore({ time_seconds, rom_pct, unbroken_sets }) {
   return Math.round(score * 10) / 10; // one decimal place
 }
 
-module.exports = { computeHolisticScore, REFERENCE_TIME_SECONDS };
+// Same math, but returns the component breakdown for the session-detail UI.
+function computeBreakdown({ time_seconds, rom_pct, unbroken_sets }) {
+  const t = Number(time_seconds), rom = Number(rom_pct), sets = Number(unbroken_sets);
+  const timeScore = clamp((REFERENCE_TIME_SECONDS / Math.max(t, 1)) * 100, 0, 100);
+  const romFactor = clamp(rom / 100, 0, 1);
+  const pacingFactor = clamp(0.7 + 0.03 * sets, 0.7, 1);
+  return {
+    timeScore: Math.round(timeScore * 10) / 10,
+    romFactor: Math.round(romFactor * 100) / 100,
+    pacingFactor: Math.round(pacingFactor * 100) / 100,
+    score: Math.round(timeScore * romFactor * pacingFactor * 10) / 10,
+  };
+}
+
+module.exports = { computeHolisticScore, computeBreakdown, REFERENCE_TIME_SECONDS };

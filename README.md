@@ -25,6 +25,35 @@ by `GET /api/wod/today`).
 Badges are seeded (`first_log`, `sub_4_fran`, `century`) with their rules in the
 `badges.criteria` JSONB column and evaluated after every result.
 
+Each `results` row also carries the session metrics WurQ tracks — `avg_hr`,
+`peak_hr`, `calories`, `power_output`, `work_volume`, and a per-movement
+breakdown (`movements` JSONB: name, reps, ROM %, category). These are computed
+by `metrics.js` (shared by the seed backfill and the live log endpoint).
+
+## Athlete profile
+
+The **Profile** tab is a full training history with stickiness hooks, all from
+real queries over the seeded month:
+
+- **Training history** — reverse-chron session list; tap a session for the full
+  WurQ-style log (score + breakdown, time, avg/peak HR, calories, power, volume,
+  per-movement reps + ROM).
+- **Personal Records** — best Holistic Score, fastest benchmarks, top power,
+  longest streak. Logging a result that beats a PR fires a **celebration** and a
+  `pr` feed event ("you beat your Fran time by 17s!").
+- **Progress** — Holistic Score trend chart, workload by muscle group, and a
+  "this week vs last" getting-fitter stat.
+- **Streak & consistency** — current streak + a month calendar heatmap (intensity
+  by score), with a loss-aversion nudge to train today.
+- **Comparison** — real percentiles vs your box and your experience level
+  ("top 1% in your box", "your Fran beats 97% of RX athletes").
+- **Benchmark tracking** — per repeated benchmark (Fran, Helen, …), the history
+  over time with a sparkline.
+
+Log in as **matt@pegacorngroup.com** (the seeded hero) to see a rich month, a
+27-day streak, several PRs, and top-of-box standing. Their today's Fran is left
+unlogged on purpose — log a fast time to trigger the PR celebration live.
+
 ## Holistic Score
 
 Scores are computed **server-side only** (`holisticScore.js`) — the single
@@ -47,6 +76,9 @@ one file so they are easy to tune.
 | GET | `/api/leaderboard/boxes/:workoutId` | Box-vs-box: each box scored by **avg Holistic Score × participation rate**, with the component numbers. |
 | GET | `/api/feed/box/:boxId` | Recent feed events for a box's members, newest first. |
 | POST | `/api/feed/:eventId/kudos` | Increment the kudos count on a feed event. |
+| GET | `/api/athlete/:userId/history` | Reverse-chron session list. |
+| GET | `/api/athlete/:userId/session/:resultId` | Full session detail + score breakdown + movements. |
+| GET | `/api/athlete/:userId/profile` | Profile bundle: summary, PRs, trend, heatmap, workload, comparison percentiles, benchmark histories. |
 | GET | `/api/boxes` | List boxes (id, name, location, member count). |
 | GET | `/api/workouts` | List workouts (for the challenge WOD picker). |
 | GET | `/api/owner/box/:boxId/dashboard` | Owner dashboard: participation, box-vs-box rank + rival gap, churn-risk members (quiet 10+ days), hot streaks. |

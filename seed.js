@@ -24,6 +24,9 @@
 
 const { pool, migrate } = require('./db');
 const { computeHolisticScore } = require('./holisticScore');
+const { deriveMetrics } = require('./metrics');
+
+const HERO_EMAIL = 'matt@pegacorngroup.com'; // the demo user — gets a rich month
 
 const SEED = 20260601;            // fixed base seed -> reproducible world
 const DAYS = 28;                  // days of activity ending today (k=0 = today)
@@ -95,6 +98,18 @@ const WOD_LIB = [
 const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 const expFor = (a) => (a >= 0.88 ? 'competitor' : a >= 0.62 ? 'RX' : a >= 0.42 ? 'intermediate' : 'beginner');
 
+// One result for day-offset k at effective ability eff, incl. WurQ metrics.
+function genResult(k, eff, rng) {
+  const isFran = FRAN_DAYS.has(k);
+  const wod = isFran ? { name: 'Fran', base: 200 } : WOD_LIB[k % WOD_LIB.length];
+  const rom = clamp(Math.round(72 + eff * 28 + (rng() * 2 - 1) * 4), 60, 100);
+  const sets = clamp(Math.round(3 + eff * 9 + (rng() * 2 - 1) * 1.5), 1, 14);
+  const time = clamp(Math.round(wod.base * (1.45 - eff * 0.7) + (rng() * 2 - 1) * 22), 90, 900);
+  const holistic = computeHolisticScore({ time_seconds: time, rom_pct: rom, unbroken_sets: sets });
+  const metrics = deriveMetrics({ workoutName: wod.name, time_seconds: time, rom_pct: rom, unbroken_sets: sets, ability: eff, rng });
+  return { k, time, rom, sets, holistic, metrics };
+}
+
 function pickArchetype(rng, persona) {
   const mix = ARCHETYPES[persona];
   const r = rng();
@@ -139,15 +154,10 @@ function generateWorld() {
           if (!train) continue;
 
           const eff = clamp(ability + box.improve * 0.15 * prog + (rng() * 2 - 1) * 0.06, 0.05, 0.99);
-          const isFran = FRAN_DAYS.has(k);
-          const base = isFran ? 200 : WOD_LIB[k % WOD_LIB.length].base;
-          const rom = clamp(Math.round(72 + eff * 28 + (rng() * 2 - 1) * 4), 60, 100);
-          const sets = clamp(Math.round(3 + eff * 9 + (rng() * 2 - 1) * 1.5), 1, 14);
-          const time = clamp(Math.round(base * (1.45 - eff * 0.7) + (rng() * 2 - 1) * 22), 90, 900);
-          const holistic = computeHolisticScore({ time_seconds: time, rom_pct: rom, unbroken_sets: sets });
-          results.push({ k, time, rom, sets, holistic });
+          const r = genResult(k, eff, rng);
+          results.push(r);
           if (firstK < 0 || k > firstK) firstK = k; // earliest day = largest k
-          if (isFran && time < 240 && (franBestK < 0 || k > franBestK)) franBestK = k;
+          if (FRAN_DAYS.has(k) && r.time < 240 && (franBestK < 0 || k > franBestK)) franBestK = k;
         }
       }
       athletes.push({ email, name, exp: expFor(ability), boxName: box.name, results, firstK, franBestK });
@@ -155,7 +165,27 @@ function generateWorld() {
     }
     bIndex++;
   }
+  athletes.push(buildHero());
   return athletes;
+}
+
+// The demo user: a rich, strong month at the home box. Trains every day k=1..27
+// (a long current streak ending yesterday) but NOT today (k=0), so logging
+// today's Fran live can set a personal record and fire the celebration.
+function buildHero() {
+  const rng = mulberry32(SEED + 424242);
+  const ability = 0.80; // strong, top-of-box, but not literally #1
+  const results = [];
+  let firstK = -1, franBestK = -1;
+  for (let k = DAYS - 1; k >= 1; k--) {
+    const prog = (DAYS - 1 - k) / (DAYS - 1);
+    const eff = clamp(ability + 0.06 * prog + (rng() * 2 - 1) * 0.05, 0.5, 0.97);
+    const r = genResult(k, eff, rng);
+    results.push(r);
+    if (firstK < 0 || k > firstK) firstK = k;
+    if (FRAN_DAYS.has(k) && r.time < 240 && (franBestK < 0 || k > franBestK)) franBestK = k;
+  }
+  return { email: HERO_EMAIL, name: 'Matt P', exp: 'RX', boxName: HOME_BOX, results, firstK, franBestK };
 }
 
 // ---- bulk helpers -----------------------------------------------------------
@@ -257,15 +287,20 @@ async function main() {
     const resultRows = [];
     for (const a of athletes) {
       for (const r of a.results) {
-        resultRows.push([a.userId, workoutIds[r.k], r.time, r.rom, r.sets, r.holistic, ts(r.k)]);
+        const m = r.metrics;
+        resultRows.push([a.userId, workoutIds[r.k], r.time, r.rom, r.sets, r.holistic,
+          m.avg_hr, m.peak_hr, m.calories, m.power_output, m.work_volume, JSON.stringify(m.movements), ts(r.k)]);
       }
     }
     await bulkInsert(client, 'results',
-      ['user_id', 'workout_id', 'time_seconds', 'rom_pct', 'unbroken_sets', 'holistic_score', 'created_at'],
+      ['user_id', 'workout_id', 'time_seconds', 'rom_pct', 'unbroken_sets', 'holistic_score',
+        'avg_hr', 'peak_hr', 'calories', 'power_output', 'work_volume', 'movements', 'created_at'],
       resultRows,
       `ON CONFLICT (user_id, workout_id) DO UPDATE SET time_seconds = EXCLUDED.time_seconds,
          rom_pct = EXCLUDED.rom_pct, unbroken_sets = EXCLUDED.unbroken_sets,
-         holistic_score = EXCLUDED.holistic_score, created_at = EXCLUDED.created_at`);
+         holistic_score = EXCLUDED.holistic_score, avg_hr = EXCLUDED.avg_hr, peak_hr = EXCLUDED.peak_hr,
+         calories = EXCLUDED.calories, power_output = EXCLUDED.power_output,
+         work_volume = EXCLUDED.work_volume, movements = EXCLUDED.movements, created_at = EXCLUDED.created_at`);
 
     // Badges: first_log (earliest training day) + sub_4_fran (earliest sub-240 Fran)
     const badgeRow = await client.query(`SELECT code, badge_id FROM badges`);
