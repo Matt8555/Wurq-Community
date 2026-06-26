@@ -26,7 +26,9 @@ const { pool, migrate } = require('./db');
 const { computeHolisticScore } = require('./holisticScore');
 const { deriveMetrics } = require('./metrics');
 
-const HERO_EMAIL = 'matt@pegacorngroup.com'; // the demo user — gets a rich month
+// The demo login that gets a full personal month backfilled. Override per deploy
+// with the DEMO_EMAIL env var if you sign in with a different email.
+const DEMO_EMAIL = process.env.DEMO_EMAIL || 'matt@pegacorngroup.com';
 
 const SEED = 20260601;            // fixed base seed -> reproducible world
 const DAYS = 28;                  // days of activity ending today (k=0 = today)
@@ -165,27 +167,106 @@ function generateWorld() {
     }
     bIndex++;
   }
-  athletes.push(buildHero());
+  athletes.push(buildDemoAthlete());
   return athletes;
 }
 
-// The demo user: a rich, strong month at the home box. Trains every day k=1..27
-// (a long current streak ending yesterday) but NOT today (k=0), so logging
-// today's Fran live can set a personal record and fire the celebration.
-function buildHero() {
+// The demo user: a realistic AVERAGE athlete at the home box. Trains ~4x/week
+// with a current streak (k=0..6 incl. today), mid-pack ability, a few personal
+// bests and slight improvement over the month — a believable everyday athlete.
+function buildDemoAthlete(email = DEMO_EMAIL) {
   const rng = mulberry32(SEED + 424242);
-  const ability = 0.80; // strong, top-of-box, but not literally #1
+  const ability = 0.55; // genuinely mid-pack — an everyday athlete
   const results = [];
   let firstK = -1, franBestK = -1;
-  for (let k = DAYS - 1; k >= 1; k--) {
+  for (let k = DAYS - 1; k >= 0; k--) {
     const prog = (DAYS - 1 - k) / (DAYS - 1);
-    const eff = clamp(ability + 0.06 * prog + (rng() * 2 - 1) * 0.05, 0.5, 0.97);
+    const train = k <= 6 ? true : rng() < 0.5; // ~4x/week + a 7-day current streak
+    if (!train) continue;
+    const eff = clamp(ability + 0.08 * prog + (rng() * 2 - 1) * 0.06, 0.3, 0.9);
     const r = genResult(k, eff, rng);
     results.push(r);
     if (firstK < 0 || k > firstK) firstK = k;
     if (FRAN_DAYS.has(k) && r.time < 240 && (franBestK < 0 || k > franBestK)) franBestK = k;
   }
-  return { email: HERO_EMAIL, name: 'Matt P', exp: 'RX', boxName: HOME_BOX, results, firstK, franBestK };
+  return { email, name: 'Matt P', exp: 'intermediate', boxName: HOME_BOX, results, firstK, franBestK };
+}
+
+// Helpers to turn a day-offset k into a date string / timestamp anchored to today.
+function dateHelpers(anchor) {
+  const [Y, M, D] = anchor.split('-').map(Number);
+  const dayStr = (k) => new Date(Date.UTC(Y, M - 1, D - k, 12)).toISOString().slice(0, 10);
+  return { dayStr, ts: (k) => `${dayStr(k)} 12:00:00` };
+}
+
+const RESULT_COLS = ['user_id', 'workout_id', 'time_seconds', 'rom_pct', 'unbroken_sets', 'holistic_score',
+  'avg_hr', 'peak_hr', 'calories', 'power_output', 'work_volume', 'movements', 'created_at'];
+const RESULT_CONFLICT = `ON CONFLICT (user_id, workout_id) DO UPDATE SET time_seconds = EXCLUDED.time_seconds,
+  rom_pct = EXCLUDED.rom_pct, unbroken_sets = EXCLUDED.unbroken_sets, holistic_score = EXCLUDED.holistic_score,
+  avg_hr = EXCLUDED.avg_hr, peak_hr = EXCLUDED.peak_hr, calories = EXCLUDED.calories,
+  power_output = EXCLUDED.power_output, work_volume = EXCLUDED.work_volume,
+  movements = EXCLUDED.movements, created_at = EXCLUDED.created_at`;
+const resultRow = (uid, wid, r, tsStr) => [uid, wid, r.time, r.rom, r.sets, r.holistic,
+  r.metrics.avg_hr, r.metrics.peak_hr, r.metrics.calories, r.metrics.power_output, r.metrics.work_volume,
+  JSON.stringify(r.metrics.movements), tsStr];
+
+// Backfill (or refresh) just the demo athlete's month into the existing seeded
+// world — idempotent and NON-destructive (touches only this account). Lets a
+// deploy give the demo login a full personal history without rebuilding the world.
+async function ensureDemoAthlete(email = DEMO_EMAIL) {
+  const anchor = (await pool.query(`SELECT to_char(CURRENT_DATE, 'YYYY-MM-DD') AS d`)).rows[0].d;
+  const { dayStr, ts } = dateHelpers(anchor);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const boxRow = await client.query('SELECT box_id FROM boxes WHERE name = $1', [HOME_BOX]);
+    if (!boxRow.rows[0]) { await client.query('ROLLBACK'); return false; } // world not seeded yet
+    const boxId = boxRow.rows[0].box_id;
+
+    const wRows = (await client.query(
+      `SELECT workout_id, to_char(wod_date,'YYYY-MM-DD') AS d FROM workouts
+        WHERE wod_date >= CURRENT_DATE - ${DAYS}`)).rows;
+    const widByDate = {};
+    wRows.forEach((w) => { widByDate[w.d] = w.workout_id; });
+
+    const a = buildDemoAthlete(email);
+    const uid = await upsertUser(client, email);
+    await upsertProfile(client, uid, { display_name: a.name, gym_name: HOME_BOX, exp: a.exp });
+    await joinBox(client, uid, boxId);
+
+    const rows = [];
+    for (const r of a.results) {
+      const wid = widByDate[dayStr(r.k)];
+      if (wid) rows.push(resultRow(uid, wid, r, ts(r.k)));
+    }
+    await bulkInsert(client, 'results', RESULT_COLS, rows, RESULT_CONFLICT);
+
+    if (a.firstK >= 0) await client.query(
+      `INSERT INTO user_badges (user_id, badge_id, earned_at) SELECT $1, badge_id, $2 FROM badges
+         WHERE code = 'first_log' ON CONFLICT (user_id, badge_id) DO NOTHING`, [uid, ts(a.firstK)]);
+    if (a.franBestK >= 0) await client.query(
+      `INSERT INTO user_badges (user_id, badge_id, earned_at) SELECT $1, badge_id, $2 FROM badges
+         WHERE code = 'sub_4_fran' ON CONFLICT (user_id, badge_id) DO NOTHING`, [uid, ts(a.franBestK)]);
+
+    // refresh this account's seeded feed (don't touch their live-logged events)
+    await client.query(`DELETE FROM feed_events WHERE user_id = $1 AND payload->>'seed' = 'true'`, [uid]);
+    for (const r of a.results.filter((x) => x.k <= 3)) {
+      await client.query(
+        `INSERT INTO feed_events (user_id, type, payload, kudos, created_at) VALUES ($1, 'result_logged', $2, $3, $4)`,
+        [uid, JSON.stringify({ workout_name: FRAN_DAYS.has(r.k) ? 'Fran' : WOD_LIB[r.k % WOD_LIB.length].name,
+          holistic_score: r.holistic, time_seconds: r.time, seed: 'true' }), 2 + (r.k % 4), ts(r.k)]);
+    }
+
+    await client.query('COMMIT');
+    console.log(`[demo] backfilled ${email}: ${rows.length} sessions into ${HOME_BOX}`);
+    return true;
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('[demo] backfill failed:', e.message);
+    return false;
+  } finally {
+    client.release();
+  }
 }
 
 // ---- bulk helpers -----------------------------------------------------------
@@ -203,6 +284,29 @@ async function bulkInsert(client, table, columns, rows, conflict = '') {
     });
     await client.query(`INSERT INTO ${table} (${columns.join(',')}) VALUES ${values.join(',')} ${conflict}`, params);
   }
+}
+
+// Single-row upserts used by the demo-athlete backfill.
+async function upsertUser(client, email) {
+  const { rows } = await client.query(
+    `INSERT INTO users (email) VALUES ($1)
+       ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email RETURNING user_id`, [email]);
+  return rows[0].user_id;
+}
+async function upsertProfile(client, userId, { display_name, gym_name, exp }) {
+  await client.query(
+    `INSERT INTO profiles (user_id, display_name, gym_name, experience_level, profile_complete, updated_at)
+       VALUES ($1, $2, $3, $4, true, now())
+       ON CONFLICT (user_id) DO UPDATE SET display_name = EXCLUDED.display_name,
+         gym_name = EXCLUDED.gym_name, experience_level = EXCLUDED.experience_level,
+         profile_complete = true, updated_at = now()`,
+    [userId, display_name, gym_name, exp]);
+}
+async function joinBox(client, userId, boxId) {
+  await client.query(
+    `INSERT INTO box_memberships (user_id, box_id) VALUES ($1, $2) ON CONFLICT (user_id, box_id) DO NOTHING`,
+    [userId, boxId]);
+  await client.query(`DELETE FROM box_memberships WHERE user_id = $1 AND box_id <> $2`, [userId, boxId]);
 }
 
 async function upsertUsersReturning(client, emails) {
@@ -225,9 +329,7 @@ async function main() {
   await migrate(); // ensure schema + base badges exist
 
   const anchorRow = await pool.query(`SELECT to_char(CURRENT_DATE, 'YYYY-MM-DD') AS d`);
-  const [Y, M, D] = anchorRow.rows[0].d.split('-').map(Number);
-  const dayStr = (k) => new Date(Date.UTC(Y, M - 1, D - k, 12)).toISOString().slice(0, 10);
-  const ts = (k) => `${dayStr(k)} 12:00:00`;
+  const { dayStr, ts } = dateHelpers(anchorRow.rows[0].d);
 
   const athletes = generateWorld();
 
@@ -286,21 +388,9 @@ async function main() {
     // Results (bulk — the big one)
     const resultRows = [];
     for (const a of athletes) {
-      for (const r of a.results) {
-        const m = r.metrics;
-        resultRows.push([a.userId, workoutIds[r.k], r.time, r.rom, r.sets, r.holistic,
-          m.avg_hr, m.peak_hr, m.calories, m.power_output, m.work_volume, JSON.stringify(m.movements), ts(r.k)]);
-      }
+      for (const r of a.results) resultRows.push(resultRow(a.userId, workoutIds[r.k], r, ts(r.k)));
     }
-    await bulkInsert(client, 'results',
-      ['user_id', 'workout_id', 'time_seconds', 'rom_pct', 'unbroken_sets', 'holistic_score',
-        'avg_hr', 'peak_hr', 'calories', 'power_output', 'work_volume', 'movements', 'created_at'],
-      resultRows,
-      `ON CONFLICT (user_id, workout_id) DO UPDATE SET time_seconds = EXCLUDED.time_seconds,
-         rom_pct = EXCLUDED.rom_pct, unbroken_sets = EXCLUDED.unbroken_sets,
-         holistic_score = EXCLUDED.holistic_score, avg_hr = EXCLUDED.avg_hr, peak_hr = EXCLUDED.peak_hr,
-         calories = EXCLUDED.calories, power_output = EXCLUDED.power_output,
-         work_volume = EXCLUDED.work_volume, movements = EXCLUDED.movements, created_at = EXCLUDED.created_at`);
+    await bulkInsert(client, 'results', RESULT_COLS, resultRows, RESULT_CONFLICT);
 
     // Badges: first_log (earliest training day) + sub_4_fran (earliest sub-240 Fran)
     const badgeRow = await client.query(`SELECT code, badge_id FROM badges`);
@@ -391,12 +481,13 @@ async function main() {
   const c = t.rows[0];
   console.log(`[seed] world rebuilt — ${c.boxes} boxes, ${c.athletes} athletes, ${c.results} results, ` +
     `${c.workouts} workouts, ${c.challenges} challenges, ${c.feed} feed events, ${c.badges} badge awards.`);
-  console.log(`[seed] Demo box (athlete home + owner): "${HOME_BOX}". Set your athlete gym to it, or switch to Owner view.`);
+  console.log(`[seed] Demo box: "${HOME_BOX}". Demo login: "${DEMO_EMAIL}" (average athlete, full month).`);
 }
 
-// Exported so the server can auto-seed an empty database on startup. (main()
-// shares the ./db pool and does NOT close it.) Run directly to seed manually.
-module.exports = { runSeed: main };
+// Exported so the server can auto-seed an empty database on startup, or backfill
+// just the demo athlete on later boots. (main() shares the ./db pool and does NOT
+// close it.) Run directly to seed manually.
+module.exports = { runSeed: main, ensureDemoAthlete, DEMO_EMAIL };
 
 if (require.main === module) {
   main()
