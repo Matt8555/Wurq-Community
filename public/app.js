@@ -258,7 +258,9 @@ function renderProfileForm() {
         </div>
 
         <label class="field field-gym"><span class="lbl">Your gym / box ★</span>
-          <input type="text" id="gym_name" placeholder="e.g. CrossFit Pegacorn" value="${escapeAttr(profile.gym_name)}" /></label>
+          <input type="text" id="gym_name" list="boxOptions" placeholder="e.g. CrossFit Borderland" value="${escapeAttr(profile.gym_name)}" autocomplete="off" />
+          <datalist id="boxOptions"></datalist>
+          <span class="hint" id="gymHint">Pick an existing box to join the community — or type a new one.</span></label>
 
         <label class="field"><span class="lbl">Display name</span>
           <input type="text" id="display_name" placeholder="How you show up on the leaderboard" value="${escapeAttr(profile.display_name)}" /></label>
@@ -289,6 +291,17 @@ function renderProfileForm() {
       <div class="center"><button class="link" id="reset">Not you? Start over</button></div>
     </div>
   `));
+
+  // Suggest existing boxes so athletes join a populated community, not a solo box.
+  (async () => {
+    try {
+      const { boxes } = await api('GET', '/api/boxes');
+      const dl = content.querySelector('#boxOptions');
+      if (dl) dl.innerHTML = boxes
+        .sort((a, b) => (b.member_count || 0) - (a.member_count || 0))
+        .map((b) => `<option value="${escapeAttr(b.name)}">${escapeHtml(b.location || '')}</option>`).join('');
+    } catch (_) { /* suggestions are best-effort */ }
+  })();
 
   let units = profile.units === 'kg' ? 'kg' : 'lb';
   const unitsEl = content.querySelector('#units');
