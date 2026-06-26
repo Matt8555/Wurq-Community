@@ -15,9 +15,11 @@ const navEl = document.querySelector('.nav');
 
 let userId = localStorage.getItem(STORAGE_KEY);
 let profile = null;
-let currentView = 'profile';     // 'profile' | 'log' | 'leaderboard' | 'feed'
+let currentView = 'profile';     // 'profile' | 'log' | 'leaderboard' | 'community' | 'feed'
 let todayWorkout = null;
 let lbTab = 'box';               // 'box' | 'boxes'
+let communitySpace = 'all';      // selected Circle space (mock)
+const likedPosts = new Set();    // client-only like state for the Circle mock
 let pendingAvatarUrl = null;
 
 // ---- helpers ----------------------------------------------------------------
@@ -107,6 +109,7 @@ function render() {
   if (currentView === 'profile') return renderProfile();
   if (currentView === 'log') return renderLog();
   if (currentView === 'leaderboard') return renderLeaderboard();
+  if (currentView === 'community') return renderCommunity();
   if (currentView === 'feed') return renderFeed();
 }
 
@@ -569,6 +572,150 @@ async function renderFeed() {
       } catch (e) { showToast(e.message); }
     });
     list.appendChild(item);
+  });
+}
+
+// ============================================================================
+// Community — Circle.so integration (MOCK)
+// ----------------------------------------------------------------------------
+// This is a realistic DEMO mock of the Circle.so community embed. There is NO
+// real Circle auth or API here — the spaces and posts below are hard-coded so
+// the tab reads as "Circle, seamlessly inside WurQ."
+//
+// TODO (real integration, once the Circle plan is provisioned): replace this
+// rendered mock with the live Circle community embedded via <iframe> pointing at
+// community.wurq.io (hosted on the same TLD as the portal) and sign members in
+// transparently using Circle's headless SSO — so a logged-in WurQ athlete lands
+// in their Circle space with no extra login. Keep this portal chrome around it.
+// ============================================================================
+
+// Circle "spaces" (mock). `key` 'all' shows everything.
+const COMMUNITY_SPACES = [
+  { key: 'all', name: 'All posts' },
+  { key: 'throwdowns', name: 'Throwdowns' },
+  { key: 'scaling', name: 'Scaling & Skills' },
+  { key: 'prs', name: 'PRs & Wins' },
+];
+
+// Seeded Circle discussion posts (mock data).
+const COMMUNITY_POSTS = [
+  {
+    id: 'p1', space: 'throwdowns', author: 'Coach Mike', role: 'Coach', color: '#c6ff00',
+    time: '2h ago',
+    title: 'This Saturday: Summer Throwdown 🔥',
+    body: 'Partner WOD + a surprise finisher. Teams of 2, all levels — scaled and RX heats. ' +
+          'Drop your partner in the replies so we can set the heat sheet. Who\'s in?',
+    replies: 12, likes: 34,
+  },
+  {
+    id: 'p2', space: 'scaling', author: 'Sara K', role: null, color: '#7cd4ff',
+    time: '5h ago',
+    title: 'How should I scale Fran?',
+    body: 'First time doing Fran tomorrow. Pull-ups are still my weak point — band, jumping, ' +
+          'or ring rows? And is 65 lb a sensible thruster weight to start? 🙏',
+    replies: 8, likes: 5,
+  },
+  {
+    id: 'p3', space: 'prs', author: 'Dan R', role: null, color: '#ff9f7c',
+    time: 'yesterday',
+    title: '400 lb deadlift!! 🎉',
+    body: 'Two years ago I couldn\'t pull 225. Hit 400 clean this morning. This community is ' +
+          'the reason I kept showing up — thank you all. 🖤',
+    replies: 21, likes: 57,
+  },
+  {
+    id: 'p4', space: 'throwdowns', author: 'Coach Mike', role: 'Coach', color: '#c6ff00',
+    time: '2d ago',
+    title: 'Welcome our new members 👋',
+    body: 'Five new faces this week — say hi, grab a partner for Saturday, and don\'t be shy ' +
+          'about asking questions in Scaling & Skills.',
+    replies: 4, likes: 18,
+  },
+];
+
+function spaceName(key) {
+  const s = COMMUNITY_SPACES.find((x) => x.key === key);
+  return s ? s.name : 'All posts';
+}
+
+function renderCommunity() {
+  setScreenName('Community');
+  content.innerHTML = '';
+
+  const posts = communitySpace === 'all'
+    ? COMMUNITY_POSTS
+    : COMMUNITY_POSTS.filter((p) => p.space === communitySpace);
+
+  const wrap = el(`
+    <div>
+      <!-- MOCK: Circle.so embed chrome. Real version is an iframe to
+           community.wurq.io with headless SSO (see comment block above). -->
+      <div class="circle-strip">
+        <div class="left">
+          <span class="circle-mark"></span>
+          <span class="label">Community <span class="by">· powered by Circle</span></span>
+        </div>
+        <span class="live">WurQ space</span>
+      </div>
+
+      <div class="space-chips" id="spaceChips">
+        ${COMMUNITY_SPACES.map((s) =>
+          `<button class="space-chip ${s.key === communitySpace ? 'active' : ''}" data-space="${s.key}"># ${escapeHtml(s.name)}</button>`
+        ).join('')}
+      </div>
+
+      <div class="space-head">
+        <div class="sname"><span class="hash">#</span> ${escapeHtml(spaceName(communitySpace))}</div>
+        <button class="new-post" id="newPost">+ New post</button>
+      </div>
+
+      <div id="posts"></div>
+    </div>
+  `);
+  content.appendChild(wrap);
+
+  // Space switcher
+  wrap.querySelector('#spaceChips').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-space]'); if (!b) return;
+    communitySpace = b.dataset.space; renderCommunity();
+  });
+
+  // New post / replies are mock entry points into Circle.
+  wrap.querySelector('#newPost').addEventListener('click', () =>
+    showToast('Posting opens in Circle (mock)'));
+
+  const list = wrap.querySelector('#posts');
+  posts.forEach((p) => {
+    const liked = likedPosts.has(p.id);
+    const likeCount = p.likes + (liked ? 1 : 0);
+    const card = el(`
+      <div class="post-card">
+        <div class="post-top">
+          <div class="post-av" style="background:${p.color}">${escapeHtml(initials(p.author))}</div>
+          <div class="post-who">
+            <div class="post-author">${escapeHtml(p.author)}${p.role ? `<span class="role">${escapeHtml(p.role)}</span>` : ''}</div>
+            <div class="post-meta">${escapeHtml(p.time)} · # ${escapeHtml(spaceName(p.space))}</div>
+          </div>
+        </div>
+        <div class="post-title">${escapeHtml(p.title)}</div>
+        <div class="post-body">${escapeHtml(p.body)}</div>
+        <div class="post-foot">
+          <button class="react like ${liked ? 'liked' : ''}" data-id="${p.id}">♥ <span class="lc">${likeCount}</span></button>
+          <button class="react reply">💬 <span>${p.replies}</span></button>
+        </div>
+      </div>
+    `);
+    // Likes toggle client-side only (mock — no API call).
+    card.querySelector('.like').addEventListener('click', (e) => {
+      const btn = e.currentTarget;
+      if (likedPosts.has(p.id)) likedPosts.delete(p.id); else likedPosts.add(p.id);
+      const on = likedPosts.has(p.id);
+      btn.classList.toggle('liked', on);
+      btn.querySelector('.lc').textContent = p.likes + (on ? 1 : 0);
+    });
+    card.querySelector('.reply').addEventListener('click', () =>
+      showToast('Replies open in Circle (mock)'));
+    list.appendChild(card);
   });
 }
 

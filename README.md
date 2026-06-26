@@ -58,6 +58,13 @@ storage (S3).
 Anyone with a `user_id` (cached in the browser) can act as that athlete. Real
 login (and using this as the SSO identity provider) is a later roadmap step.
 
+**The Community tab is a demo mock of the Circle.so integration** (see the
+comment block in `public/app.js`). It renders a Circle-style space with seeded
+posts inside the portal chrome to show "Circle, seamlessly inside WurQ." There
+is no real Circle auth/API yet — the live version will embed Circle via an
+`<iframe>` to `community.wurq.io` (same TLD) with headless SSO once the Circle
+plan is provisioned.
+
 ## Local development
 
 Requires a Postgres database. Point `DATABASE_URL` at it; the server runs the
