@@ -804,17 +804,21 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Internal server error.' });
 });
 
-// Auto-seed the demo world. By default seeds only when the DB is empty (no
-// boxes), so a fresh deploy populates itself without wiping live data on every
-// restart. Set SEED_ON_BOOT=force to rebuild the world, or =never to disable.
+// Auto-seed the demo world. Seeds when the seeded world is ABSENT — detected by
+// the presence of the canonical demo box (CrossFit Borderland), not just "no
+// boxes", so it still fires on a DB that only has a user-created box. Once the
+// world exists it won't reseed (live activity is preserved across restarts).
+// SEED_ON_BOOT=force rebuilds; SEED_ON_BOOT=never disables.
+const SEED_SENTINEL_BOX = 'CrossFit Borderland';
 async function maybeSeed() {
   const mode = process.env.SEED_ON_BOOT;
   if (mode === 'never') return;
-  let empty = true;
-  try { empty = (await pool.query('SELECT COUNT(*)::int AS n FROM boxes')).rows[0].n === 0; }
-  catch (_) { /* table may not exist yet on a brand-new DB */ }
-  if (mode === 'force' || empty) {
-    console.log(`[startup] seeding demo world (${mode === 'force' ? 'forced' : 'database is empty'})…`);
+  let worldPresent = false;
+  try {
+    worldPresent = (await pool.query('SELECT 1 FROM boxes WHERE name = $1 LIMIT 1', [SEED_SENTINEL_BOX])).rowCount > 0;
+  } catch (_) { /* tables may not exist yet on a brand-new DB */ }
+  if (mode === 'force' || !worldPresent) {
+    console.log(`[startup] seeding demo world (${mode === 'force' ? 'forced' : 'seeded world not found'})…`);
     try { await runSeed(); } catch (e) { console.error('[startup] seed failed (continuing):', e.message); }
   }
 }
