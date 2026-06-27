@@ -625,6 +625,96 @@
     .mc-btn.promote { background: var(--acid); color: #10130a; }
     .mc-btn.demote { background: transparent; color: var(--muted); border: 1px solid var(--border); }
 
+    /* ---- Compete: competitions ---- */
+    .lb-row.podium { border-color: #ffd24a55; }
+    .lb-row.podium .lb-rank { color: #ffd24a; }
+    .scope-badge { display: inline-block; font-size: 0.62rem; font-weight: 800; text-transform: uppercase;
+      letter-spacing: 0.04em; padding: 2px 7px; border-radius: 999px; vertical-align: middle; }
+    .scope-badge.box { background: var(--acid-dim); color: var(--acid); border: 1px solid var(--acid); }
+    .scope-badge.comm { background: var(--surface-2); color: var(--chalk); border: 1px solid var(--border); }
+
+    .stand-hero { background: linear-gradient(135deg, var(--acid-dim), var(--surface)); border: 1px solid var(--acid);
+      border-radius: 16px; padding: 16px; margin-bottom: 16px; text-align: center; }
+    .stand-hero .sh-lab { color: var(--acid); font-weight: 800; font-size: 0.8rem; }
+    .stand-hero .sh-big { font-size: 2.4rem; font-weight: 900; line-height: 1.1; margin: 4px 0; }
+    .stand-hero .sh-of { font-size: 1rem; color: var(--muted); font-weight: 600; }
+    .stand-hero .sh-title { color: var(--chalk); font-size: 0.9rem; }
+
+    .stand-strip { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; margin-bottom: 8px; }
+    .stand-strip::-webkit-scrollbar { display: none; }
+    .stand-chip { flex: none; min-width: 116px; background: var(--surface); border: 1px solid var(--border);
+      border-radius: 12px; padding: 10px 12px; cursor: pointer; }
+    .stand-chip.podium { border-color: #ffd24a; }
+    .stand-chip .sc-rank { font-size: 1.3rem; font-weight: 900; }
+    .stand-chip.podium .sc-rank { color: #ffd24a; }
+    .stand-chip .sc-title { font-size: 0.78rem; font-weight: 700; margin-top: 2px; }
+    .stand-chip .sc-sub { font-size: 0.66rem; color: var(--muted); text-transform: capitalize; }
+
+    .comp-card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+      padding: 13px; margin-bottom: 10px; cursor: pointer; }
+    .comp-card:active { transform: scale(0.99); }
+    .comp-card .cc-top { display: flex; gap: 11px; align-items: flex-start; }
+    .comp-card .cc-icon { font-size: 1.5rem; flex: none; }
+    .comp-card .cc-head { flex: 1; min-width: 0; }
+    .comp-card .cc-title { font-weight: 800; font-size: 0.95rem; }
+    .comp-card .cc-meta { margin-top: 4px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .comp-card .cc-rem { color: var(--muted); font-size: 0.72rem; }
+    .comp-card .cc-bottom { display: flex; align-items: baseline; justify-content: space-between; margin-top: 10px; }
+    .comp-card .cc-rank { font-size: 0.9rem; } .comp-card .cc-rank b { color: var(--acid); }
+    .comp-card .cc-rank.podium b { color: #ffd24a; }
+    .comp-card .cc-val { font-weight: 900; font-size: 1.15rem; }
+    .comp-card .cc-unit { font-size: 0.68rem; color: var(--muted); font-weight: 600; }
+    .comp-card .cc-leader { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border);
+      font-size: 0.74rem; color: var(--muted); }
+
+    .winner-row { display: flex; align-items: center; gap: 11px; background: var(--surface);
+      border: 1px solid var(--border); border-radius: 12px; padding: 10px 13px; margin-bottom: 8px; }
+    .winner-row .wr-medal { font-size: 1.2rem; flex: none; }
+    .winner-row .wr-main { flex: 1; min-width: 0; }
+    .winner-row .nm { font-weight: 700; font-size: 0.9rem; }
+    .winner-row .meta { color: var(--muted); font-size: 0.74rem; }
+    .winner-row .wr-box { font-size: 0.7rem; color: var(--muted); flex: none; }
+
+    /* ---- Compete: matches ---- */
+    .feed-sub-line { color: var(--muted); font-size: 0.72rem; margin-top: 2px; }
+    .match-card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 13px; margin-bottom: 12px; }
+    .match-card .mc-head { display: flex; align-items: center; gap: 10px; }
+    .match-card .mc-id { flex: 1; min-width: 0; }
+    .match-card .mc-id .nm { font-weight: 700; font-size: 0.92rem; }
+    .match-card .mc-id .meta { font-size: 0.74rem; color: var(--muted); }
+    .same-box { color: var(--acid); } .x-box { color: #7cd4ff; }
+    .basis-chip { flex: none; font-size: 0.64rem; font-weight: 800; padding: 3px 8px; border-radius: 999px; border: 1px solid var(--border); }
+    .basis-chip.b-perf { color: var(--acid); border-color: var(--acid); background: var(--acid-dim); }
+    .basis-chip.b-strug { color: #ffb86b; border-color: #ffb86b55; background: #ffb86b18; }
+    .basis-chip.b-jrny { color: #7cd4ff; border-color: #7cd4ff55; background: #7cd4ff18; }
+    .match-reason { font-style: italic; color: var(--chalk); font-size: 0.86rem; margin: 10px 0; padding-left: 10px; border-left: 3px solid var(--acid); }
+    .match-actions { display: flex; gap: 7px; }
+    .m-act { flex: 1; background: var(--surface-2); border: 1px solid var(--border); color: var(--chalk);
+      border-radius: 9px; padding: 8px 4px; font-size: 0.74rem; font-weight: 700; cursor: pointer; }
+    .m-act.done { background: var(--acid-dim); color: var(--acid); border-color: var(--acid); }
+    .m-act:disabled { opacity: 0.7; }
+    .m-challenge { width: 100%; margin-top: 8px; background: transparent; border: 1px dashed var(--acid);
+      color: var(--acid); border-radius: 9px; padding: 9px; font-size: 0.76rem; font-weight: 700; cursor: pointer; }
+    .m-challenge:disabled { opacity: 0.7; border-style: solid; }
+
+    .partner-row { display: flex; align-items: center; gap: 11px; background: var(--surface);
+      border: 1px solid var(--border); border-radius: 12px; padding: 10px 13px; margin-bottom: 8px; }
+    .partner-row .pr-main { flex: 1; min-width: 0; }
+    .partner-row .nm { font-weight: 700; font-size: 0.9rem; }
+    .partner-row .meta { color: var(--muted); font-size: 0.73rem; }
+    .partner-row .partner-note { color: var(--acid); opacity: 0.85; margin-top: 2px; }
+
+    .h2h-card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 13px; margin-bottom: 10px; }
+    .h2h-card.active { border-color: var(--acid); }
+    .h2h-card .h2h-head { display: flex; justify-content: space-between; font-size: 0.85rem; gap: 8px; }
+    .h2h-card .h2h-state { color: var(--muted); font-size: 0.74rem; flex: none; }
+    .h2h-bar { height: 8px; background: var(--surface-2); border-radius: 999px; overflow: hidden; margin: 9px 0 6px; }
+    .h2h-fill { display: block; height: 100%; background: var(--acid); border-radius: 999px; }
+    .h2h-nums { display: flex; justify-content: space-between; font-size: 0.8rem; }
+    .h2h-nums b { color: var(--chalk); }
+    .h2h-lead { color: var(--acid); font-weight: 800; font-size: 0.74rem; }
+    .h2h-foot { text-align: center; margin-top: 4px; }
+
     .hidden { display: none !important; }
   </style>
 </head>

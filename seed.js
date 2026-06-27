@@ -360,6 +360,55 @@ async function upsertUsersReturning(client, emails) {
   return map;
 }
 
+// ---- competitions / matchmaking seed helpers --------------------------------
+// SQL date ranges for the slate (Postgres-side so they track "now").
+const COMP_RANGES = {
+  this_week:  ["date_trunc('week', now())", "date_trunc('week', now()) + interval '7 days' - interval '1 second'"],
+  this_month: ["date_trunc('month', now())", "date_trunc('month', now()) + interval '1 month' - interval '1 second'"],
+  last_week:  ["date_trunc('week', now()) - interval '7 days'", "date_trunc('week', now()) - interval '1 second'"],
+};
+
+async function insertComp(client, { scope, boxId = null, cadence, type, title, movement = null, window, status = 'active' }) {
+  const [s, e] = COMP_RANGES[window];
+  const { rows } = await client.query(
+    `INSERT INTO competitions (scope, box_id, cadence, type, title, movement, starts_at, ends_at, status)
+       VALUES ($1,$2,$3,$4,$5,$6, ${s}, ${e}, $7)
+       RETURNING id, scope, box_id, type, movement, starts_at, ends_at`,
+    [scope, boxId, cadence, type, title, movement, status]);
+  return rows[0];
+}
+
+// Pick the winner (top user + value) of a competition window, mirroring the
+// server metric. Returns { user_id, value } or null.
+async function compWinner(client, c) {
+  const boxJoin = c.scope === 'box' ? 'JOIN box_memberships m ON m.user_id = r.user_id AND m.box_id = $3' : '';
+  const p = [c.starts_at, c.ends_at];
+  if (c.scope === 'box') p.push(c.box_id);
+  let sql;
+  if (c.type === 'highest_avg') {
+    sql = `SELECT r.user_id, ROUND(AVG(r.holistic_score),1)::float8 AS value FROM results r ${boxJoin}
+            WHERE r.created_at BETWEEN $1 AND $2 AND r.holistic_score IS NOT NULL
+            GROUP BY r.user_id HAVING COUNT(*) >= 1 ORDER BY value DESC LIMIT 1`;
+  } else if (c.type === 'most_workouts') {
+    sql = `SELECT r.user_id, COUNT(*)::float8 AS value FROM results r ${boxJoin}
+            WHERE r.created_at BETWEEN $1 AND $2 GROUP BY r.user_id ORDER BY value DESC LIMIT 1`;
+  } else if (c.type === 'most_consistent') {
+    sql = `SELECT r.user_id, COUNT(DISTINCT r.created_at::date)::float8 AS value FROM results r ${boxJoin}
+            WHERE r.created_at BETWEEN $1 AND $2 GROUP BY r.user_id ORDER BY value DESC LIMIT 1`;
+  } else { // most_improved
+    sql = `WITH x AS (SELECT r.user_id, r.holistic_score AS hs,
+                ROW_NUMBER() OVER (PARTITION BY r.user_id ORDER BY r.created_at ASC, r.result_id) AS rn_a,
+                ROW_NUMBER() OVER (PARTITION BY r.user_id ORDER BY r.created_at DESC, r.result_id) AS rn_d,
+                COUNT(*) OVER (PARTITION BY r.user_id) AS cnt
+              FROM results r ${boxJoin} WHERE r.created_at BETWEEN $1 AND $2 AND r.holistic_score IS NOT NULL)
+            SELECT user_id, ROUND((MAX(hs) FILTER (WHERE rn_d=1) - MAX(hs) FILTER (WHERE rn_a=1))::numeric,1)::float8 AS value
+              FROM x WHERE cnt >= 2 GROUP BY user_id ORDER BY value DESC LIMIT 1`;
+  }
+  return (await client.query(sql, p)).rows[0] || null;
+}
+
+const canonPair = (a, b) => (a < b ? [a, b] : [b, a]);
+
 // ---- main -------------------------------------------------------------------
 async function main() {
   await migrate(); // ensure schema + base badges exist
@@ -374,6 +423,9 @@ async function main() {
     await client.query('BEGIN');
 
     // Reset the world (deterministic rebuild). FK-safe order.
+    await client.query('DELETE FROM head_to_heads');
+    await client.query('DELETE FROM training_partners');
+    await client.query('DELETE FROM competitions');
     await client.query('DELETE FROM box_roles');
     await client.query('DELETE FROM follows');
     await client.query('DELETE FROM referrals');
@@ -711,6 +763,129 @@ async function main() {
     }
     await bulkInsert(client, 'feed_events', ['user_id', 'type', 'payload', 'kudos', 'created_at'], comebackRows);
 
+    // ---- Recurring competitions — a live slate + completed past with winners.
+    const compFeed = []; // comp_win events
+    // Community-wide slate.
+    await insertComp(client, { scope: 'community', cadence: 'weekly', type: 'highest_avg', title: 'Community Engine ⚡ Highest Avg', window: 'this_week' });
+    await insertComp(client, { scope: 'community', cadence: 'weekly', type: 'most_improved', title: 'Most Improved This Week 📈', window: 'this_week' });
+    await insertComp(client, { scope: 'community', cadence: 'weekly', type: 'most_workouts', title: 'Grind Leaders 🔁 Most Workouts', window: 'this_week' });
+    await insertComp(client, { scope: 'community', cadence: 'weekly', type: 'movement_specific', movement: 'Pull-ups', title: 'Pull-up Push 💪 (Weekly)', window: 'this_week' });
+    await insertComp(client, { scope: 'community', cadence: 'monthly', type: 'highest_avg', title: 'WurQ Champion 🏆 (Monthly)', window: 'this_month' });
+    await insertComp(client, { scope: 'community', cadence: 'monthly', type: 'most_consistent', title: 'Iron Habit 🔥 Most Consistent (Monthly)', window: 'this_month' });
+    // Community completed (last week) + winners.
+    for (const def of [
+      { type: 'highest_avg', title: 'Community Engine ⚡ (last week)' },
+      { type: 'most_improved', title: 'Most Improved 📈 (last week)' },
+    ]) {
+      const c = await insertComp(client, { scope: 'community', cadence: 'weekly', type: def.type, title: def.title, window: 'last_week', status: 'completed' });
+      const w = await compWinner(client, c);
+      if (w) {
+        await client.query('UPDATE competitions SET winner_user_id = $1 WHERE id = $2', [w.user_id, c.id]);
+        compFeed.push([w.user_id, 'comp_win', JSON.stringify({ title: def.title, type_label: 'Community', value: w.value, seed: 'true' }), 8 + Math.floor(frng() * 30), ts(Math.floor(1 + frng() * 3))]);
+      }
+    }
+    // Per-box slate: weekly most_improved + most_workouts, monthly highest_avg,
+    // plus a completed weekly most_improved (last week) with a winner.
+    for (const box of BOX_DEFS) {
+      const boxId = boxIds[box.name];
+      const short = box.name.replace(/^(CrossFit|CF)\s+/i, '').replace(/\s+CrossFit$/i, '').trim() || box.name;
+      await insertComp(client, { scope: 'box', boxId, cadence: 'weekly', type: 'most_improved', title: `${short} Most Improved 📈`, window: 'this_week' });
+      await insertComp(client, { scope: 'box', boxId, cadence: 'weekly', type: 'most_workouts', title: `${short} Grind 🔁`, window: 'this_week' });
+      await insertComp(client, { scope: 'box', boxId, cadence: 'monthly', type: 'highest_avg', title: `${short} Champion 🏆`, window: 'this_month' });
+      const done = await insertComp(client, { scope: 'box', boxId, cadence: 'weekly', type: 'most_improved', title: `${short} Most Improved (last week)`, window: 'last_week', status: 'completed' });
+      const w = await compWinner(client, done);
+      if (w) {
+        await client.query('UPDATE competitions SET winner_user_id = $1 WHERE id = $2', [w.user_id, done.id]);
+        compFeed.push([w.user_id, 'comp_win', JSON.stringify({ title: `${short} Most Improved`, type_label: short, value: w.value, seed: 'true' }), 5 + Math.floor(frng() * 22), ts(Math.floor(1 + frng() * 3))]);
+      }
+    }
+    await bulkInsert(client, 'feed_events', ['user_id', 'type', 'payload', 'kudos', 'created_at'], compFeed);
+
+    // ---- Training partners — performance-based pairs (within-box + cross-box).
+    const avgHol = (a) => (a.results.length ? a.results.reduce((s, r) => s + r.holistic, 0) / a.results.length : 0);
+    const tpSeen = new Set();
+    const tpRows = [];
+    const tpFeed = [];
+    const addPartner = (a, b, basis, withFeed = false) => {
+      if (!a || !b || a === b) return;
+      const [lo, hi] = canonPair(a.userId, b.userId);
+      const key = lo + '|' + hi; if (tpSeen.has(key)) return; tpSeen.add(key);
+      tpRows.push([lo, hi, basis, ts(Math.floor(frng() * DAYS))]);
+      if (withFeed) tpFeed.push([a.userId, 'training_partner',
+        JSON.stringify({ partner_name: b.name, partner_box: b.boxName, you_name: a.name, seed: 'true' }),
+        2 + Math.floor(frng() * 10), ts(Math.floor(frng() * 5))]);
+    };
+    // Within-box: pair athletes of similar pace (adjacent after sorting by avg).
+    for (const box of BOX_DEFS) {
+      const roster = athletes.filter((a) => a.boxName === box.name && a.results.length >= 3)
+        .sort((x, y) => avgHol(x) - avgHol(y));
+      for (let i = 0; i + 1 < roster.length && i < 12; i += 2) addPartner(roster[i], roster[i + 1], 'similar pace', frng() < 0.4);
+    }
+    // Cross-box: similar pace across gyms (feeds the cross-box community).
+    const byAvg = athletes.filter((a) => a.results.length >= 3).slice().sort((x, y) => avgHol(x) - avgHol(y));
+    for (let n = 0; n < 14; n++) {
+      const i = Math.floor(frng() * (byAvg.length - 1));
+      const a = byAvg[i];
+      // find a near neighbor in a different box
+      let b = null;
+      for (let j = i + 1; j < Math.min(byAvg.length, i + 8); j++) { if (byAvg[j].boxName !== a.boxName) { b = byAvg[j]; break; } }
+      if (b) addPartner(a, b, 'similar pace · cross-box', frng() < 0.5);
+    }
+    // Guarantee the demo logins have partners (in-box + cross-box).
+    if (matt && alex) addPartner(matt, alex, 'training partners at Borderland', true);
+    if (matt) {
+      const xb = athletes.find((a) => a.boxName !== HOME_BOX && a.results.length >= 5);
+      if (xb) addPartner(matt, xb, 'similar pace · cross-box', true);
+    }
+    if (alex) {
+      const inbox = athletes.find((a) => a.boxName === HOME_BOX && a !== alex && a !== matt && a.results.length >= 3);
+      if (inbox) addPartner(alex, inbox, 'similar pace', false);
+    }
+    await bulkInsert(client, 'training_partners', ['a_user_id', 'b_user_id', 'basis', 'created_at'], tpRows,
+      'ON CONFLICT (a_user_id, b_user_id) DO NOTHING');
+    await bulkInsert(client, 'feed_events', ['user_id', 'type', 'payload', 'kudos', 'created_at'], tpFeed);
+
+    // ---- Head-to-head matchups — active mid-flight + one completed (with feed).
+    const h2hActiveStart = ts(3), h2hActiveEnd = `${dayStr(-4)} 12:00:00`;
+    async function makeH2H(a, b, metric, startsAt, endsAt, status) {
+      if (!a || !b) return null;
+      const { rows } = await client.query(
+        `INSERT INTO head_to_heads (a_user_id, b_user_id, metric, starts_at, ends_at, status)
+           VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`, [a.userId, b.userId, metric, startsAt, endsAt, status]);
+      return rows[0].id;
+    }
+    const h2hFeed = [];
+    // Active: matt vs a Borderland rival.
+    const rival = athletes.find((a) => a.boxName === HOME_BOX && a !== matt && a !== alex && a.results.length >= 5);
+    if (matt && rival) {
+      const id = await makeH2H(matt, rival, 'highest_avg', h2hActiveStart, h2hActiveEnd, 'active');
+      h2hFeed.push([matt.userId, 'h2h_start', JSON.stringify({ opponent_name: rival.name, metric: 'highest_avg', unit: 'avg score', seed: 'true' }), 3 + Math.floor(frng() * 8), ts(2)]);
+    }
+    // Active: two cross-box athletes.
+    const xa = athletes.find((a) => a.boxName === 'Apex CrossFit' && a.results.length >= 5);
+    const xb2 = athletes.find((a) => a.boxName === 'Iron Valley CrossFit' && a.results.length >= 5);
+    if (xa && xb2) {
+      await makeH2H(xa, xb2, 'most_workouts', h2hActiveStart, h2hActiveEnd, 'active');
+      h2hFeed.push([xa.userId, 'h2h_start', JSON.stringify({ opponent_name: xb2.name, metric: 'most_workouts', unit: 'workouts', seed: 'true' }), 4 + Math.floor(frng() * 10), ts(3)]);
+    }
+    // Completed: alex vs a cross-box athlete, last week, with a winner.
+    const past = athletes.find((a) => a.boxName === 'Rising Tide CrossFit' && a.results.length >= 5);
+    if (alex && past) {
+      const startsAt = ts(11), endsAt = ts(7);
+      const id = await makeH2H(alex, past, 'highest_avg', startsAt, endsAt, 'completed');
+      const st = (await client.query(
+        `SELECT user_id, AVG(holistic_score) AS v FROM results WHERE user_id = ANY($1::uuid[]) AND created_at BETWEEN $2 AND $3 GROUP BY user_id`,
+        [[alex.userId, past.userId], startsAt, endsAt])).rows;
+      const winner = st.sort((p, q) => Number(q.v) - Number(p.v))[0];
+      if (winner) {
+        await client.query('UPDATE head_to_heads SET winner_user_id = $1 WHERE id = $2', [winner.user_id, id]);
+        const wName = winner.user_id === alex.userId ? alex.name : past.name;
+        const lName = winner.user_id === alex.userId ? past.name : alex.name;
+        h2hFeed.push([winner.user_id, 'h2h_result', JSON.stringify({ opponent_name: lName, won: true, seed: 'true' }), 6 + Math.floor(frng() * 18), ts(6)]);
+      }
+    }
+    await bulkInsert(client, 'feed_events', ['user_id', 'type', 'payload', 'kudos', 'created_at'], h2hFeed);
+
     await client.query('COMMIT');
   } catch (e) {
     await client.query('ROLLBACK');
@@ -725,11 +900,15 @@ async function main() {
            (SELECT COUNT(*) FROM results)::int AS results,
            (SELECT COUNT(*) FROM workouts)::int AS workouts,
            (SELECT COUNT(*) FROM challenges)::int AS challenges,
+           (SELECT COUNT(*) FROM competitions)::int AS competitions,
+           (SELECT COUNT(*) FROM training_partners)::int AS partners,
+           (SELECT COUNT(*) FROM head_to_heads)::int AS h2h,
            (SELECT COUNT(*) FROM feed_events)::int AS feed,
            (SELECT COUNT(*) FROM user_badges)::int AS badges`);
   const c = t.rows[0];
   console.log(`[seed] world rebuilt — ${c.boxes} boxes, ${c.athletes} athletes, ${c.results} results, ` +
-    `${c.workouts} workouts, ${c.challenges} challenges, ${c.feed} feed events, ${c.badges} badge awards.`);
+    `${c.workouts} workouts, ${c.challenges} challenges, ${c.competitions} competitions, ` +
+    `${c.partners} training partners, ${c.h2h} head-to-heads, ${c.feed} feed events, ${c.badges} badge awards.`);
   console.log(`[seed] Demo box: "${HOME_BOX}". Demo logins: ${DEMO_ATHLETES.map((p) => `${p.email} (${p.name})`).join(', ')}.`);
 }
 

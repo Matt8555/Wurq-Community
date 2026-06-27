@@ -13,7 +13,8 @@ Postgres.
 `user_id` (UUID) is the real, immutable key; `email` is the human match key.
 Tables: `users`, `profiles`, `identities`, `boxes`, `box_memberships`,
 `box_roles`, `workouts`, `results`, `badges`, `user_badges`, `feed_events`,
-`squads`, `squad_members`, `follows`, `referrals`, `challenges`. The `identities`
+`squads`, `squad_members`, `follows`, `referrals`, `challenges`, `competitions`,
+`training_partners`, `head_to_heads`. The `identities`
 table lets you link other identity sources later (Shopify, Circle, watch, …)
 **without restructuring** — each source just adds a row keyed by `user_id`.
 
@@ -112,6 +113,48 @@ one file so they are easy to tune.
 | GET | `/api/box/:boxId/roster?userId=` | Coach-gated roster: sessions, last logged, week-vs-prev score trend, connection count, quiet & under-connected flags, plus today/total/quiet summary. |
 | POST | `/api/box/:boxId/announce` | Coach-gated: post a box announcement (`announcement` feed event everyone sees). |
 | GET | `/api/users/:userId/onboarding` | Ensures the user's "[Box] — New Crew" cohort squad, returns box, cohort, coaches to meet, and 5 suggested boxmates to follow + current connection count. |
+| GET | `/api/competitions?userId=&scope=&cadence=` | Active competitions visible to a user (community + their box), each with the user's rank/value, the leader, and time remaining; plus recently completed comps with winners. |
+| GET | `/api/competitions/:id/leaderboard?userId=` | A competition's live leaderboard (top 25 + the user's own row), computed from results in the window by the comp's metric. |
+| GET | `/api/users/:userId/competitions` | The user's standing in every active comp they're placing in, best rank first (powers "you're #2 in Most Improved this week"). |
+| GET | `/api/users/:userId/matches` | Performance-based matches (box-first, then community) across three bases — similar performance, shared struggle, similar journey — each with a reason + relevance. |
+| GET | `/api/users/:userId/training-partners` | A user's training partners (with each partner's box + last-trained time). |
+| POST | `/api/training-partners` | Create/remove a mutual training-partner link (`aUserId`, `bUserId`, `basis`, `action`); writes a `training_partner` feed event. |
+| POST | `/api/highfive` | One-tap high-five (`fromUserId`, `toUserId`); writes a `highfive` feed event. |
+| GET | `/api/users/:userId/head-to-heads` | A user's 1-on-1 matchups with live scores (your value vs theirs) and days remaining. |
+| POST | `/api/head-to-heads` | Start a head-to-head (`aUserId`, `bUserId`, `metric`, `startsAt`, `endsAt`); writes an `h2h_start` feed event. |
+
+## Recurring competitions & performance-based matchmaking
+
+Two reinforcing systems make the world feel alive and pull people into
+connections (the retention anchor from onboarding):
+
+**Recurring competitions** (`competitions` table — `scope` box/community,
+`cadence` weekly/monthly, `type`, `[starts_at, ends_at]`, `status`, `winner`).
+Leaderboards are **computed live** from results in each comp's window by metric,
+so standings are always real and self-updating; only the slate + completed
+winners are stored. Five metric types let *different* athletes win different
+things — **most_improved** (biggest Holistic gain), **highest_avg**,
+**most_workouts**, **movement_specific** (e.g. Pull-up volume), and
+**most_consistent** (participation days). The seed lays out a live slate
+(several weeklies + a bigger monthly, at both box and community level) plus
+completed past comps with real winners. The **Compete → Competitions** screen
+leads with *"You're winning something"* — surfacing the user's best placement so
+even non-elite athletes see themselves on top of *some* board.
+
+**Performance-based matchmaking** (`training_partners`, `head_to_heads`). The
+match engine (`GET /api/users/:id/matches`) pairs a user across three bases —
+**similar performance** ("you both ran Fran in 3:14"), **shared struggle** ("you're
+both working on Thrusters", from each athlete's weakest movement), and **similar
+journey** (both on hot streaks / comebacks / new) — **box-first, then
+community** so cross-box ties form. Each match offers a clear arc: **surface →
+connect** (high-five, follow, or **become training partners** — a persisted
+mutual link; partners see each other's logs and are "notified when the other
+trains") **→ compete** (challenge head-to-head next week, a two-athlete
+competition scored over a window). The seed lays in training-partner pairs
+(within-box + cross-box) and active + completed head-to-heads. New partnerships,
+competition wins, and head-to-head results all emit **feed events**, so wins and
+connections get celebrated. Training partners also count toward a user's
+connection count (the churn-risk signal).
 
 ## Coaches & connection-driven onboarding
 
@@ -255,8 +298,13 @@ What it generates (a 4-week window ending today, framed as June 2026):
   server-side scoring module. This realistic spread powers the churn and streak
   features.
 - **Box-vs-box standings** that rank by personality, with a tight rivalry around
-  the demo box; **3 completed + 1 active** head-to-head challenge; streaks,
+  the demo box; **3 completed + 1 active** box throwdown; streaks,
   badge unlocks spread across the month, and a populated per-box feed.
+- **~48 recurring competitions** — a live weekly + monthly slate at community
+  and per-box level (the five metric types), plus completed past comps with real
+  computed winners; **~75 training-partner pairs** (within-box + cross-box) and
+  active + completed **head-to-head** matchups, with feed events celebrating new
+  partnerships, competition wins, and head-to-head results.
 
 **Performance & idempotency:** results load via batched multi-row INSERTs (not
 one at a time); the whole run takes ~1–2s. The script **rebuilds the world

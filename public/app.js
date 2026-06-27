@@ -15,7 +15,8 @@ const navEl = document.querySelector('.nav');
 
 let userId = localStorage.getItem(STORAGE_KEY);
 let profile = null;
-let currentView = 'profile';     // 'profile' | 'log' | 'leaderboard' | 'community' | 'feed'
+let currentView = 'profile';     // 'profile' | 'log' | 'leaderboard' | 'compete' | 'community' | 'feed'
+let competeTab = 'comps';        // 'comps' | 'people'
 let todayWorkout = null;
 let lbTab = 'box';               // 'box' | 'boxes'
 let communitySpace = 'all';      // selected Circle space (mock)
@@ -109,7 +110,7 @@ function num(v) { return Number(v); }
 function setScreenName(name) { if (screenNameEl) screenNameEl.textContent = name; }
 
 const NAV_ATHLETE = [
-  ['log', '▦', 'WOD'], ['leaderboard', '≡', 'Board'],
+  ['log', '▦', 'WOD'], ['leaderboard', '≡', 'Board'], ['compete', '◈', 'Compete'],
   ['community', '❖', 'Community'], ['feed', '✦', 'Feed'], ['profile', '◉', 'Profile'],
 ];
 const NAV_OWNER = [
@@ -158,6 +159,7 @@ function render() {
   if (currentView === 'profile') return renderProfile();
   if (currentView === 'log') return renderLog();
   if (currentView === 'leaderboard') return renderLeaderboard();
+  if (currentView === 'compete') return renderCompete();
   if (currentView === 'community') return renderCommunity();
   if (currentView === 'feed') return renderFeed();
 }
@@ -864,6 +866,21 @@ function feedText(ev) {
   }
   if (ev.type === 'referral_joined') {
     return `${name} grew the box — a friend just joined 🎉 <span class="accent">+${p.points || 50} pts</span>`;
+  }
+  if (ev.type === 'training_partner') {
+    return `${name} teamed up with <span class="accent">${escapeHtml(p.partner_name || 'an athlete')}</span> as training partners 🤝${p.partner_box ? `<div class="feed-sub-line">${escapeHtml(p.partner_box)}</div>` : ''}`;
+  }
+  if (ev.type === 'h2h_start') {
+    return `${name} started a head-to-head vs <span class="accent">${escapeHtml(p.opponent_name || 'a rival')}</span> ⚔️ <span class="muted-note">(${escapeHtml(p.unit || 'avg score')})</span>`;
+  }
+  if (ev.type === 'h2h_result') {
+    return `${name} won a head-to-head vs <span class="accent">${escapeHtml(p.opponent_name || 'a rival')}</span> 🏆`;
+  }
+  if (ev.type === 'comp_win') {
+    return `${name} won <span class="accent">${escapeHtml(p.title || 'a competition')}</span> 🏆${p.value != null ? ` <span class="muted-note">(${num(p.value)})</span>` : ''}`;
+  }
+  if (ev.type === 'highfive') {
+    return `${name} high-fived <span class="accent">${escapeHtml(p.to_name || 'an athlete')}</span> ✋`;
   }
   return `${name} did something`;
 }
@@ -2082,6 +2099,291 @@ async function renderOnboarding() {
 
   wrap.querySelector('#obDone').addEventListener('click', finish);
   wrap.querySelector('#obSkip').addEventListener('click', () => renderRichProfile());
+}
+
+// ============================================================================
+// Compete — recurring competitions + performance-based matchmaking
+// ============================================================================
+function fmtRemaining(endsAt) {
+  const ms = new Date(endsAt).getTime() - Date.now();
+  if (ms <= 0) return 'ended';
+  const d = Math.floor(ms / 86400000);
+  if (d >= 1) return `${d}d left`;
+  const h = Math.floor(ms / 3600000);
+  if (h >= 1) return `${h}h left`;
+  return `${Math.max(1, Math.floor(ms / 60000))}m left`;
+}
+function ordinal(n) {
+  const s = ['th', 'st', 'nd', 'rd'], v = n % 100;
+  return n + (s[(v - 20) % 10] || s[v] || s[0]);
+}
+function scopeBadge(c) {
+  return c.scope === 'box'
+    ? `<span class="scope-badge box">${escapeHtml(c.box_name || 'Your box')}</span>`
+    : `<span class="scope-badge comm">Community</span>`;
+}
+
+function renderCompete() {
+  setScreenName('Compete');
+  if (!userId) return setView('profile');
+  content.innerHTML = '';
+  const wrap = el(`
+    <div>
+      <div class="tabs" id="competeTabs">
+        <button data-tab="comps">🏆 Competitions</button>
+        <button data-tab="people">🤝 Find people</button>
+      </div>
+      <div id="competeBody"></div>
+    </div>`);
+  content.appendChild(wrap);
+  const tabs = wrap.querySelector('#competeTabs');
+  tabs.querySelectorAll('button').forEach((b) => b.classList.toggle('active', b.dataset.tab === competeTab));
+  tabs.addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; competeTab = b.dataset.tab; renderCompete(); });
+  const body = wrap.querySelector('#competeBody');
+  if (competeTab === 'people') return renderMatchesInto(body);
+  return renderCompetitionsInto(body);
+}
+
+function compCard(c) {
+  const me = c.me;
+  const rankStr = me ? `${ordinal(me.rank)} / ${me.total}` : '—';
+  const meClass = me && me.rank <= 3 ? 'podium' : '';
+  const leader = c.leader ? `🥇 ${escapeHtml(c.leader.display_name)}` : '';
+  const unitVal = me ? `<span class="cc-val">${num(me.value)}<span class="cc-unit"> ${escapeHtml(c.unit)}</span></span>` : '';
+  return `
+    <div class="comp-card" data-id="${c.id}">
+      <div class="cc-top">
+        <div class="cc-icon">${c.icon || '🏅'}</div>
+        <div class="cc-head">
+          <div class="cc-title">${escapeHtml(c.title)}</div>
+          <div class="cc-meta">${scopeBadge(c)} <span class="cc-rem">⏳ ${fmtRemaining(c.ends_at)}</span></div>
+        </div>
+      </div>
+      <div class="cc-bottom">
+        <div class="cc-rank ${meClass}">${me ? `You're <b>${rankStr}</b>` : '<span class="muted-note">Log to enter</span>'}</div>
+        ${unitVal}
+      </div>
+      ${leader ? `<div class="cc-leader">${leader}${c.leader && c.leader.box_name ? ` · ${escapeHtml(c.leader.box_name)}` : ''}</div>` : ''}
+    </div>`;
+}
+
+async function renderCompetitionsInto(container) {
+  container.innerHTML = '<p class="subtitle">Loading competitions…</p>';
+  let standings, list;
+  try {
+    [standings, list] = await Promise.all([
+      api('GET', `/api/users/${userId}/competitions`).then((r) => r.standings),
+      api('GET', `/api/competitions?userId=${userId}`),
+    ]);
+  } catch (e) { container.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+
+  const comps = list.competitions || [];
+  const winners = list.winners || [];
+  const weekly = comps.filter((c) => c.cadence === 'weekly');
+  const monthly = comps.filter((c) => c.cadence === 'monthly');
+  // Best placement first, so even non-elite athletes see themselves winning something.
+  const best = standings.slice().sort((a, b) => a.rank - b.rank)[0];
+
+  container.innerHTML = '';
+  const wrap = el(`
+    <div>
+      ${best ? `<div class="stand-hero">
+        <div class="sh-lab">You're winning something 🎉</div>
+        <div class="sh-big">${ordinal(best.rank)}<span class="sh-of"> of ${best.total}</span></div>
+        <div class="sh-title">${best.icon || ''} ${escapeHtml(best.title)}</div>
+      </div>` : ''}
+
+      ${standings.length ? `<div class="sec-title">Your standings</div><div class="stand-strip" id="strip"></div>` : ''}
+
+      <div class="sec-title">📅 This week</div>
+      <div id="weekly"></div>
+
+      <div class="sec-title">🗓️ This month</div>
+      <div id="monthly"></div>
+
+      ${winners.length ? `<div class="sec-title">🏆 Recent champions</div><div id="winners"></div>` : ''}
+    </div>`);
+  container.appendChild(wrap);
+
+  const strip = wrap.querySelector('#strip');
+  if (strip) standings.forEach((s) => {
+    const chip = el(`<div class="stand-chip ${s.rank <= 3 ? 'podium' : ''}">
+      <div class="sc-rank">${ordinal(s.rank)}</div>
+      <div class="sc-title">${escapeHtml(s.type_label)}</div>
+      <div class="sc-sub">${escapeHtml(s.cadence)} · ${s.scope === 'box' ? 'box' : 'community'}</div>
+    </div>`);
+    chip.addEventListener('click', () => renderCompetitionDetail(s.id));
+    strip.appendChild(chip);
+  });
+
+  const wkEl = wrap.querySelector('#weekly');
+  if (!weekly.length) wkEl.appendChild(el('<div class="muted-note">No weekly competitions right now.</div>'));
+  weekly.forEach((c) => { const node = el(compCard(c)); node.addEventListener('click', () => renderCompetitionDetail(c.id)); wkEl.appendChild(node); });
+
+  const moEl = wrap.querySelector('#monthly');
+  if (!monthly.length) moEl.appendChild(el('<div class="muted-note">No monthly competitions right now.</div>'));
+  monthly.forEach((c) => { const node = el(compCard(c)); node.addEventListener('click', () => renderCompetitionDetail(c.id)); moEl.appendChild(node); });
+
+  const winEl = wrap.querySelector('#winners');
+  if (winEl) winners.forEach((w) => winEl.appendChild(el(`
+    <div class="winner-row">
+      <div class="wr-medal">🏅</div>
+      <div class="wr-main"><div class="nm">${escapeHtml(w.winner ? w.winner.display_name : 'TBD')}</div>
+        <div class="meta">${escapeHtml(w.title)}</div></div>
+      ${w.winner && w.winner.box_name ? `<div class="wr-box">${escapeHtml(w.winner.box_name)}</div>` : ''}
+    </div>`)));
+}
+
+async function renderCompetitionDetail(id) {
+  setScreenName('Competition');
+  content.innerHTML = '<p class="subtitle">Loading…</p>';
+  let d;
+  try { d = await api('GET', `/api/competitions/${id}/leaderboard?userId=${userId}`); }
+  catch (e) { content.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+  const c = d.competition;
+  content.innerHTML = '';
+  const wrap = el(`
+    <div>
+      <button class="back-link" id="back">← Competitions</button>
+      <h1 class="title">${c.icon || ''} ${escapeHtml(c.title)}</h1>
+      <p class="subtitle">${scopeBadge(c)} · ${escapeHtml(c.cadence)} · ⏳ ${c.status === 'completed' ? 'ended' : fmtRemaining(c.ends_at)} · ${d.total} athletes</p>
+      ${c.movement ? `<div class="muted-note" style="margin-bottom:8px">Scored on ${escapeHtml(c.movement)} volume</div>` : ''}
+      ${d.me ? `<div class="action-banner">You're <b>${ordinal(d.me.rank)}</b> of ${d.me.total} — <b>${num(d.me.value)}</b> ${escapeHtml(c.unit)}.</div>` : ''}
+      <div id="lb"></div>
+    </div>`);
+  content.appendChild(wrap);
+  const lb = wrap.querySelector('#lb');
+  if (!d.leaderboard.length) lb.appendChild(el('<div class="empty">No results in this window yet.</div>'));
+  d.leaderboard.forEach((r) => {
+    const meRow = r.user_id === userId;
+    lb.appendChild(el(`
+      <div class="lb-row ${meRow ? 'me' : ''} ${r.rank <= 3 ? 'podium' : ''}">
+        <div class="lb-rank">${r.rank}</div>
+        <div class="lb-main"><div class="lb-name">${escapeHtml(r.display_name)}${r.is_coach ? ' <span class="coach-tag">Coach</span>' : ''}${meRow ? ' · you' : ''}</div>
+          <div class="lb-sub">${escapeHtml(r.box_name || '')}</div></div>
+        <div class="lb-score"><div class="s">${num(r.value)}</div><div class="t">${escapeHtml(c.unit)}</div></div>
+      </div>`));
+  });
+  wrap.querySelector('#back').addEventListener('click', () => setView('compete'));
+}
+
+// ---- Find your people (matchmaking) -----------------------------------------
+const BASIS_META = {
+  similar_performance: { tag: '⚡ Similar pace', cls: 'b-perf' },
+  shared_struggle:     { tag: '🎯 Shared goal', cls: 'b-strug' },
+  similar_journey:     { tag: '🧭 Same journey', cls: 'b-jrny' },
+};
+
+async function renderMatchesInto(container) {
+  container.innerHTML = '<p class="subtitle">Finding your people…</p>';
+  await ensureFollowing();
+  let m, partners, h2h;
+  try {
+    [m, partners, h2h] = await Promise.all([
+      api('GET', `/api/users/${userId}/matches`),
+      api('GET', `/api/users/${userId}/training-partners`).then((r) => r.partners),
+      api('GET', `/api/users/${userId}/head-to-heads`).then((r) => r.head_to_heads),
+    ]);
+  } catch (e) { container.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+
+  container.innerHTML = '';
+  const wrap = el(`
+    <div>
+      <p class="subtitle" style="margin-top:4px">Every connection is a reason to come back. Here's who you'd click with.</p>
+      ${h2h.length ? `<div class="sec-title">⚔️ Head-to-head</div><div id="h2h"></div>` : ''}
+      ${partners.length ? `<div class="sec-title">🤝 Your training partners</div><div id="partners"></div>` : ''}
+      <div class="sec-title">✨ Suggested matches</div>
+      <div id="matches"></div>
+    </div>`);
+  container.appendChild(wrap);
+
+  // Head-to-head
+  const h2hEl = wrap.querySelector('#h2h');
+  if (h2hEl) h2h.forEach((h) => {
+    const total = (h.my_value + h.opp_value) || 1;
+    const myPct = Math.round((h.my_value / total) * 100);
+    const leading = h.status === 'completed'
+      ? (h.winner_user_id ? (h.my_value >= h.opp_value ? 'You won 🏆' : `${h.opponent.display_name.split(' ')[0]} won`) : 'Final')
+      : (h.my_value >= h.opp_value ? 'You lead' : 'Behind');
+    h2hEl.appendChild(el(`
+      <div class="h2h-card ${h.status}">
+        <div class="h2h-head"><span>vs <b>${escapeHtml(h.opponent.display_name)}</b> · ${escapeHtml(h.opponent.box_name || '')}</span>
+          <span class="h2h-state">${h.status === 'active' ? `⏳ ${h.ends_in_days}d` : '✓ done'}</span></div>
+        <div class="h2h-bar"><span class="h2h-fill" style="width:${myPct}%"></span></div>
+        <div class="h2h-nums"><span>You <b>${num(h.my_value)}</b></span><span class="h2h-lead">${leading}</span><span><b>${num(h.opp_value)}</b> them</span></div>
+        <div class="h2h-foot muted-note">${escapeHtml(h.unit)}</div>
+      </div>`));
+  });
+
+  // Training partners
+  const pEl = wrap.querySelector('#partners');
+  if (pEl) partners.forEach((p) => {
+    pEl.appendChild(el(`
+      <div class="partner-row">
+        ${avatarHtml(p.avatar_url, p.display_name, 'feed-av')}
+        <div class="pr-main"><div class="nm">${escapeHtml(p.display_name)}</div>
+          <div class="meta">${escapeHtml(p.box_name || '')}${p.basis ? ' · ' + escapeHtml(p.basis) : ''}</div>
+          <div class="meta partner-note">🔔 You'll be notified when they train${p.last_trained ? ` · last ${timeAgo(p.last_trained)}` : ''}</div></div>
+      </div>`));
+  });
+
+  // Suggested matches
+  const mEl = wrap.querySelector('#matches');
+  if (!m.matches.length) { mEl.appendChild(el('<div class="empty">Log a few workouts and we\'ll find your people.</div>')); return; }
+  m.matches.forEach((mt) => {
+    const bm = BASIS_META[mt.basis] || { tag: 'Match', cls: '' };
+    const card = el(`
+      <div class="match-card">
+        <div class="mc-head">
+          ${avatarHtml(null, mt.display_name, 'feed-av')}
+          <div class="mc-id">
+            <div class="nm">${escapeHtml(mt.display_name)}${mt.is_coach ? ' <span class="coach-tag">Coach</span>' : ''}</div>
+            <div class="meta">${escapeHtml(mt.box_name || '')} ${mt.same_box ? '<span class="same-box">· your box</span>' : '<span class="x-box">· cross-box</span>'}</div>
+          </div>
+          <span class="basis-chip ${bm.cls}">${bm.tag}</span>
+        </div>
+        <div class="match-reason">"${escapeHtml(mt.reason)}"</div>
+        <div class="match-actions">
+          <button class="m-act hi" data-act="hi">✋ High-five</button>
+          <button class="m-act fol ${mt.following ? 'done' : ''}" data-act="follow">${mt.following ? '✓ Following' : '+ Follow'}</button>
+          <button class="m-act part" data-act="partner">🤝 Partner</button>
+        </div>
+        <button class="m-challenge" data-act="challenge">⚔️ Challenge head-to-head next week</button>
+      </div>`);
+    card.querySelector('[data-act="hi"]').addEventListener('click', async (e) => {
+      const btn = e.currentTarget; // capture before await (currentTarget nulls out)
+      try { await api('POST', '/api/highfive', { fromUserId: userId, toUserId: mt.user_id }); showToast(`High-fived ${mt.display_name.split(' ')[0]} ✋`); btn.textContent = '✓ High-fived'; btn.disabled = true; }
+      catch (err) { showToast(err.message); }
+    });
+    const folBtn = card.querySelector('[data-act="follow"]');
+    folBtn.addEventListener('click', async () => {
+      const isF = followingSet.has(mt.user_id);
+      try {
+        await api('POST', '/api/follows', { followerUserId: userId, followeeUserId: mt.user_id, action: isF ? 'unfollow' : 'follow' });
+        if (isF) followingSet.delete(mt.user_id); else followingSet.add(mt.user_id);
+        folBtn.classList.toggle('done', !isF); folBtn.textContent = !isF ? '✓ Following' : '+ Follow';
+      } catch (err) { showToast(err.message); }
+    });
+    card.querySelector('[data-act="partner"]').addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      try {
+        await api('POST', '/api/training-partners', { aUserId: userId, bUserId: mt.user_id, basis: mt.reason });
+        showToast(`You and ${mt.display_name.split(' ')[0]} are training partners 🤝`);
+        btn.textContent = '✓ Partners'; btn.disabled = true;
+      } catch (err) { showToast(err.message); }
+    });
+    card.querySelector('[data-act="challenge"]').addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      const start = new Date(); start.setDate(start.getDate() + 1);
+      const end = new Date(); end.setDate(end.getDate() + 8);
+      try {
+        await api('POST', '/api/head-to-heads', { aUserId: userId, bUserId: mt.user_id, metric: 'highest_avg', startsAt: start.toISOString(), endsAt: end.toISOString() });
+        showToast(`Head-to-head started vs ${mt.display_name.split(' ')[0]} ⚔️`);
+        btn.textContent = '✓ Challenge sent'; btn.disabled = true;
+      } catch (err) { showToast(err.message); }
+    });
+    mEl.appendChild(card);
+  });
 }
 
 // ---- bootstrap --------------------------------------------------------------

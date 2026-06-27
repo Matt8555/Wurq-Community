@@ -216,6 +216,54 @@ const SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_box_roles_box  ON box_roles(box_id);
   CREATE INDEX IF NOT EXISTS idx_box_roles_user ON box_roles(user_id);
+
+  -- Recurring competitions (weekly + monthly), box-scoped or community-wide.
+  -- Leaderboards are COMPUTED live from results within [starts_at, ends_at] by
+  -- the metric type; only the slate (and completed winners) is stored.
+  CREATE TABLE IF NOT EXISTS competitions (
+    id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    scope          TEXT NOT NULL,                 -- 'box' | 'community'
+    box_id         UUID REFERENCES boxes(box_id) ON DELETE CASCADE,  -- null for community
+    cadence        TEXT NOT NULL,                 -- 'weekly' | 'monthly'
+    type           TEXT NOT NULL,                 -- most_improved | highest_avg | most_workouts | movement_specific | most_consistent
+    title          TEXT NOT NULL,
+    movement       TEXT,                          -- for movement_specific
+    starts_at      TIMESTAMPTZ NOT NULL,
+    ends_at        TIMESTAMPTZ NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'active', -- active | completed | upcoming
+    winner_user_id UUID REFERENCES users(user_id) ON DELETE SET NULL,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS idx_competitions_scope  ON competitions(scope, cadence, status);
+  CREATE INDEX IF NOT EXISTS idx_competitions_box    ON competitions(box_id);
+
+  -- Performance-based training-partner links (mutual). Stored with a_user_id <
+  -- b_user_id (string order) so the pair is unique regardless of who initiated.
+  CREATE TABLE IF NOT EXISTS training_partners (
+    a_user_id  UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    b_user_id  UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    basis      TEXT,                              -- why they were matched (display)
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (a_user_id, b_user_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_tp_a ON training_partners(a_user_id);
+  CREATE INDEX IF NOT EXISTS idx_tp_b ON training_partners(b_user_id);
+
+  -- 1-on-1 head-to-head matchups, scored over a date window (tied to the
+  -- competition system: a personal, two-athlete competition).
+  CREATE TABLE IF NOT EXISTS head_to_heads (
+    id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    a_user_id      UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    b_user_id      UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    metric         TEXT NOT NULL DEFAULT 'highest_avg',  -- highest_avg | most_workouts
+    starts_at      TIMESTAMPTZ NOT NULL,
+    ends_at        TIMESTAMPTZ NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'active',       -- active | completed
+    winner_user_id UUID REFERENCES users(user_id) ON DELETE SET NULL,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS idx_h2h_a ON head_to_heads(a_user_id);
+  CREATE INDEX IF NOT EXISTS idx_h2h_b ON head_to_heads(b_user_id);
 `;
 
 // Idempotent fixups for databases created by earlier versions of this app:

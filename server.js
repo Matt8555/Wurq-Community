@@ -58,7 +58,8 @@ async function getProfileRow(userId) {
             EXISTS (SELECT 1 FROM box_roles br WHERE br.user_id = u.user_id AND br.box_id = b.box_id AND br.role IN ('coach','owner')) AS is_coach,
             EXISTS (SELECT 1 FROM box_roles br WHERE br.user_id = u.user_id AND br.box_id = b.box_id AND br.role = 'owner') AS is_owner,
             ((SELECT COUNT(*) FROM squad_members sm WHERE sm.user_id = u.user_id)
-              + (SELECT COUNT(*) FROM follows f WHERE f.follower_user_id = u.user_id))::int AS connection_count
+              + (SELECT COUNT(*) FROM follows f WHERE f.follower_user_id = u.user_id)
+              + (SELECT COUNT(*) FROM training_partners tp WHERE tp.a_user_id = u.user_id OR tp.b_user_id = u.user_id))::int AS connection_count
        FROM users u
        LEFT JOIN profiles p ON p.user_id = u.user_id
        LEFT JOIN LATERAL (
@@ -700,7 +701,445 @@ app.get('/api/challenges/:id/standing', wrap(async (req, res) => {
   });
 }));
 
+// ============================================================================
+// Recurring competitions + performance-based matchmaking
+// ----------------------------------------------------------------------------
+// Competition leaderboards are COMPUTED LIVE from results within the comp's
+// [starts_at, ends_at] window, by metric type. Only the slate + completed
+// winners live in the DB, so standings are always real and self-updating.
+// ============================================================================
+
+const COMP_TYPE_META = {
+  most_improved:     { label: 'Most Improved',   unit: 'pts gained', icon: '📈' },
+  highest_avg:       { label: 'Highest Avg',     unit: 'avg score',  icon: '⚡' },
+  most_workouts:     { label: 'Most Workouts',   unit: 'workouts',   icon: '🔁' },
+  movement_specific: { label: 'Movement',        unit: 'reps',       icon: '🎯' },
+  most_consistent:   { label: 'Most Consistent', unit: 'days',       icon: '🔥' },
+};
+
+// Box-of-user lateral, reused for decorating athletes with their box.
+const BOX_LATERAL = `LEFT JOIN LATERAL (
+    SELECT bx.box_id, bx.name FROM box_memberships mm JOIN boxes bx ON bx.box_id = mm.box_id
+     WHERE mm.user_id = u.user_id ORDER BY mm.joined_at DESC LIMIT 1) b ON true`;
+
+// Build the metric SQL + params for one competition. Returns rows {user_id, value}
+// ordered best-first across the whole eligible population.
+function competitionMetric(comp) {
+  const params = [comp.starts_at, comp.ends_at];
+  let boxJoin = '';
+  if (comp.scope === 'box') { params.push(comp.box_id); boxJoin = `JOIN box_memberships m ON m.user_id = r.user_id AND m.box_id = $${params.length}`; }
+  let sql;
+  switch (comp.type) {
+    case 'highest_avg':
+      sql = `SELECT r.user_id, ROUND(AVG(r.holistic_score),1)::float8 AS value
+               FROM results r ${boxJoin}
+              WHERE r.created_at BETWEEN $1 AND $2 AND r.holistic_score IS NOT NULL
+              GROUP BY r.user_id HAVING COUNT(*) >= 1 ORDER BY value DESC`;
+      break;
+    case 'most_workouts':
+      sql = `SELECT r.user_id, COUNT(*)::float8 AS value
+               FROM results r ${boxJoin}
+              WHERE r.created_at BETWEEN $1 AND $2
+              GROUP BY r.user_id ORDER BY value DESC`;
+      break;
+    case 'most_consistent':
+      sql = `SELECT r.user_id, COUNT(DISTINCT r.created_at::date)::float8 AS value
+               FROM results r ${boxJoin}
+              WHERE r.created_at BETWEEN $1 AND $2
+              GROUP BY r.user_id ORDER BY value DESC`;
+      break;
+    case 'movement_specific': {
+      params.push(comp.movement);
+      const mv = `$${params.length}`;
+      sql = `SELECT r.user_id, SUM((m2->>'reps')::int)::float8 AS value
+               FROM results r ${boxJoin}, jsonb_array_elements(r.movements) m2
+              WHERE r.created_at BETWEEN $1 AND $2 AND m2->>'movement' = ${mv}
+              GROUP BY r.user_id HAVING SUM((m2->>'reps')::int) > 0 ORDER BY value DESC`;
+      break;
+    }
+    case 'most_improved':
+    default:
+      sql = `WITH x AS (
+               SELECT r.user_id, r.holistic_score AS hs,
+                      ROW_NUMBER() OVER (PARTITION BY r.user_id ORDER BY r.created_at ASC, r.result_id) AS rn_a,
+                      ROW_NUMBER() OVER (PARTITION BY r.user_id ORDER BY r.created_at DESC, r.result_id) AS rn_d,
+                      COUNT(*) OVER (PARTITION BY r.user_id) AS cnt
+                 FROM results r ${boxJoin}
+                WHERE r.created_at BETWEEN $1 AND $2 AND r.holistic_score IS NOT NULL)
+             SELECT user_id,
+                    ROUND((MAX(hs) FILTER (WHERE rn_d=1) - MAX(hs) FILTER (WHERE rn_a=1))::numeric,1)::float8 AS value
+               FROM x WHERE cnt >= 2 GROUP BY user_id ORDER BY value DESC`;
+  }
+  return { sql, params };
+}
+
+async function competitionOrder(comp) {
+  const { sql, params } = competitionMetric(comp);
+  const { rows } = await pool.query(sql, params);
+  return rows; // [{user_id, value}] best-first
+}
+
+// Decorate a set of user_ids with name + box + coach flag.
+async function decorateUsers(userIds) {
+  const ids = [...new Set(userIds.filter(Boolean))];
+  if (!ids.length) return new Map();
+  const { rows } = await pool.query(
+    `SELECT u.user_id, COALESCE(NULLIF(p.display_name,''),'Athlete') AS display_name, p.avatar_url,
+            b.box_id, b.name AS box_name,
+            EXISTS (SELECT 1 FROM box_roles br WHERE br.user_id = u.user_id AND br.box_id = b.box_id AND br.role IN ('coach','owner')) AS is_coach
+       FROM users u LEFT JOIN profiles p ON p.user_id = u.user_id ${BOX_LATERAL}
+      WHERE u.user_id = ANY($1::uuid[])`, [ids]);
+  return new Map(rows.map((r) => [r.user_id, r]));
+}
+
+function compPublic(c) {
+  const meta = COMP_TYPE_META[c.type] || { label: c.type, unit: '', icon: '🏅' };
+  return {
+    id: c.id, scope: c.scope, box_id: c.box_id, cadence: c.cadence, type: c.type,
+    title: c.title, movement: c.movement, starts_at: c.starts_at, ends_at: c.ends_at,
+    status: c.status, type_label: meta.label, unit: meta.unit, icon: meta.icon,
+  };
+}
+
+// Active competitions visible to a user (community + their own box), each with a
+// compact standing (rank/value/total) so the UI can say "you're #2 in X".
+app.get('/api/competitions', wrap(async (req, res) => {
+  const userId = isUuid(req.query.userId) ? req.query.userId : null;
+  const scope = req.query.scope === 'box' || req.query.scope === 'community' ? req.query.scope : null;
+  const cadence = req.query.cadence === 'weekly' || req.query.cadence === 'monthly' ? req.query.cadence : null;
+  const myBox = userId ? await boxIdForUser(userId) : null;
+
+  const where = ["c.status = 'active'"];
+  const params = [];
+  // Box-scope comps are only shown for the user's own box.
+  if (myBox) { params.push(myBox); where.push(`(c.scope = 'community' OR (c.scope = 'box' AND c.box_id = $${params.length}))`); }
+  else where.push(`c.scope = 'community'`);
+  if (scope) { params.push(scope); where.push(`c.scope = $${params.length}`); }
+  if (cadence) { params.push(cadence); where.push(`c.cadence = $${params.length}`); }
+
+  const { rows: comps } = await pool.query(
+    `SELECT c.*, bx.name AS box_name FROM competitions c LEFT JOIN boxes bx ON bx.box_id = c.box_id
+      WHERE ${where.join(' AND ')} ORDER BY c.cadence, c.scope, c.type`, params);
+
+  const out = await Promise.all(comps.map(async (c) => {
+    const order = await competitionOrder(c);
+    const total = order.length;
+    let me = null;
+    if (userId) {
+      const idx = order.findIndex((r) => r.user_id === userId);
+      if (idx >= 0) me = { rank: idx + 1, value: order[idx].value, total };
+    }
+    const leaderId = order[0] ? order[0].user_id : null;
+    return { ...compPublic(c), box_name: c.box_name, total, me, leader_id: leaderId };
+  }));
+
+  // Decorate leaders.
+  const names = await decorateUsers(out.map((c) => c.leader_id));
+  out.forEach((c) => { const d = c.leader_id && names.get(c.leader_id); if (d) c.leader = { display_name: d.display_name, box_name: d.box_name }; delete c.leader_id; });
+
+  // Recently completed comps + winners (showcase).
+  const { rows: done } = await pool.query(
+    `SELECT c.*, bx.name AS box_name FROM competitions c LEFT JOIN boxes bx ON bx.box_id = c.box_id
+      WHERE c.status = 'completed' AND c.winner_user_id IS NOT NULL
+        ${myBox ? `AND (c.scope = 'community' OR c.box_id = $1)` : `AND c.scope = 'community'`}
+      ORDER BY c.ends_at DESC LIMIT 8`, myBox ? [myBox] : []);
+  const winNames = await decorateUsers(done.map((d) => d.winner_user_id));
+  const winners = done.map((d) => {
+    const w = winNames.get(d.winner_user_id);
+    return { ...compPublic(d), box_name: d.box_name, winner: w ? { display_name: w.display_name, box_name: w.box_name } : null };
+  });
+
+  res.json({ competitions: out, winners });
+}));
+
+// Full leaderboard for one competition (top 25 + the requesting user's row).
+app.get('/api/competitions/:id/leaderboard', wrap(async (req, res) => {
+  const { id } = req.params;
+  if (!isUuid(id)) return res.status(400).json({ error: 'Invalid competition id.' });
+  const userId = isUuid(req.query.userId) ? req.query.userId : null;
+  const c = (await pool.query(
+    `SELECT c.*, bx.name AS box_name FROM competitions c LEFT JOIN boxes bx ON bx.box_id = c.box_id WHERE c.id = $1`, [id])).rows[0];
+  if (!c) return res.status(404).json({ error: 'Competition not found.' });
+
+  const order = await competitionOrder(c);
+  const total = order.length;
+  const top = order.slice(0, 25);
+  const names = await decorateUsers([...top.map((r) => r.user_id), userId, c.winner_user_id]);
+  const leaderboard = top.map((r, i) => {
+    const d = names.get(r.user_id) || {};
+    return { rank: i + 1, user_id: r.user_id, value: r.value, display_name: d.display_name || 'Athlete', box_name: d.box_name, is_coach: !!d.is_coach };
+  });
+  let me = null;
+  if (userId) {
+    const idx = order.findIndex((r) => r.user_id === userId);
+    if (idx >= 0) { const d = names.get(userId) || {}; me = { rank: idx + 1, value: order[idx].value, total, display_name: d.display_name, box_name: d.box_name }; }
+  }
+  let winner = null;
+  if (c.winner_user_id) { const d = names.get(c.winner_user_id); if (d) winner = { display_name: d.display_name, box_name: d.box_name }; }
+  res.json({ competition: { ...compPublic(c), box_name: c.box_name }, total, leaderboard, me, winner });
+}));
+
+// A user's standings across every active comp they're placing in (for the
+// "you're winning something" strip). Sorted best rank first.
+app.get('/api/users/:userId/competitions', wrap(async (req, res) => {
+  const { userId } = req.params;
+  if (!isUuid(userId)) return res.status(400).json({ error: 'Invalid user id.' });
+  const myBox = await boxIdForUser(userId);
+  const { rows: comps } = await pool.query(
+    `SELECT c.*, bx.name AS box_name FROM competitions c LEFT JOIN boxes bx ON bx.box_id = c.box_id
+      WHERE c.status = 'active' AND (c.scope = 'community' ${myBox ? `OR c.box_id = $1` : ''})`,
+    myBox ? [myBox] : []);
+  const standings = [];
+  for (const c of comps) {
+    const order = await competitionOrder(c);
+    const idx = order.findIndex((r) => r.user_id === userId);
+    if (idx >= 0) standings.push({ ...compPublic(c), box_name: c.box_name, rank: idx + 1, value: order[idx].value, total: order.length });
+  }
+  standings.sort((a, b) => a.rank - b.rank);
+  res.json({ standings });
+}));
+
+// ---- Matchmaking ------------------------------------------------------------
+// Canonical ordering for a pair (so a link is unique regardless of initiator).
+const pair = (a, b) => (a < b ? [a, b] : [b, a]);
+
+async function partnerIdsFor(userId) {
+  const { rows } = await pool.query(
+    `SELECT a_user_id, b_user_id FROM training_partners WHERE a_user_id = $1 OR b_user_id = $1`, [userId]);
+  return new Set(rows.map((r) => (r.a_user_id === userId ? r.b_user_id : r.a_user_id)));
+}
+
+// Find candidate matches for a user across three bases, box-first then community.
+app.get('/api/users/:userId/matches', wrap(async (req, res) => {
+  const { userId } = req.params;
+  if (!isUuid(userId)) return res.status(400).json({ error: 'Invalid user id.' });
+  const me = await getProfileRow(userId);
+  if (!me) return res.status(404).json({ error: 'User not found.' });
+  const myBox = me.box_id || null;
+
+  const following = new Set((await pool.query(
+    'SELECT followee_user_id FROM follows WHERE follower_user_id = $1', [userId])).rows.map((r) => r.followee_user_id));
+  const partners = await partnerIdsFor(userId);
+  const exclude = new Set([userId, ...partners]);
+
+  const candidates = []; // {user_id, basis, reason, detail}
+
+  // 1) Similar performance — nearly identical time on the same workout.
+  const perf = (await pool.query(
+    `SELECT r2.user_id, w.name AS workout_name, r2.time_seconds AS their_time,
+            abs(r1.time_seconds - r2.time_seconds) AS gap
+       FROM results r1
+       JOIN results r2 ON r2.workout_id = r1.workout_id AND r2.user_id <> r1.user_id
+       JOIN workouts w ON w.workout_id = r1.workout_id
+      WHERE r1.user_id = $1 AND r1.time_seconds IS NOT NULL AND r2.time_seconds IS NOT NULL
+        AND abs(r1.time_seconds - r2.time_seconds) <= 5
+      ORDER BY gap ASC, w.wod_date DESC LIMIT 60`, [userId])).rows;
+  for (const p of perf) candidates.push({
+    user_id: p.user_id, basis: 'similar_performance',
+    reason: `You both ran ${p.workout_name} in ${fmtClock(p.their_time)}`, detail: 'similar pace',
+  });
+
+  // 2) Shared struggle — same weakest movement (lowest ROM).
+  const weak = (await pool.query(
+    `SELECT mv->>'movement' AS movement, AVG((mv->>'rom_pct')::int) AS rom
+       FROM results r, jsonb_array_elements(r.movements) mv
+      WHERE r.user_id = $1
+      GROUP BY 1 HAVING COUNT(*) >= 2 ORDER BY rom ASC LIMIT 1`, [userId])).rows[0];
+  if (weak) {
+    const others = (await pool.query(
+      `SELECT r.user_id, ROUND(AVG((mv->>'rom_pct')::int))::int AS rom
+         FROM results r, jsonb_array_elements(r.movements) mv
+        WHERE mv->>'movement' = $2 AND r.user_id <> $1
+        GROUP BY r.user_id HAVING AVG((mv->>'rom_pct')::int) <= $3
+        ORDER BY rom ASC LIMIT 60`, [userId, weak.movement, Number(weak.rom) + 6])).rows;
+    for (const o of others) candidates.push({
+      user_id: o.user_id, basis: 'shared_struggle',
+      reason: `You're both working on ${weak.movement}`, detail: 'shared goal',
+    });
+  }
+
+  // 3) Similar journey — streak buddies / comeback / newcomers (first that fits).
+  const sig = (await pool.query(
+    `SELECT (SELECT COUNT(DISTINCT created_at::date) FROM results WHERE user_id=$1 AND created_at >= now() - interval '7 days')::int AS last7,
+            (SELECT COUNT(*) FROM results WHERE user_id=$1)::int AS total,
+            (SELECT MIN(joined_at) FROM box_memberships WHERE user_id=$1) AS joined,
+            EXISTS (SELECT 1 FROM feed_events WHERE user_id=$1 AND type='comeback' AND created_at >= now() - interval '21 days') AS comeback`,
+    [userId])).rows[0];
+  const newcomer = sig.joined && (Date.now() - new Date(sig.joined).getTime()) < 21 * 86400000 && sig.total < 6;
+  let journey = null;
+  if (sig.last7 >= 5) {
+    journey = { detail: 'on a hot streak', reason: 'You both trained 5+ days this week 🔥',
+      sql: `SELECT r.user_id FROM results r WHERE r.created_at >= now() - interval '7 days' AND r.user_id <> $1
+              GROUP BY r.user_id HAVING COUNT(DISTINCT r.created_at::date) >= 5 LIMIT 80` };
+  } else if (sig.comeback) {
+    journey = { detail: 'both back after time off', reason: "You're both back after a break 🔥",
+      sql: `SELECT DISTINCT user_id FROM feed_events WHERE type='comeback' AND created_at >= now() - interval '21 days' AND user_id <> $1 LIMIT 80` };
+  } else if (newcomer) {
+    journey = { detail: 'both new', reason: 'You both just joined — find your feet together',
+      sql: `SELECT user_id FROM box_memberships WHERE joined_at >= now() - interval '21 days' AND user_id <> $1 LIMIT 80` };
+  }
+  if (journey) {
+    const others = (await pool.query(journey.sql, [userId])).rows;
+    for (const o of others) candidates.push({ user_id: o.user_id, basis: 'similar_journey', reason: journey.reason, detail: journey.detail });
+  }
+
+  // Decorate + box-first selection, keeping variety across bases and ensuring
+  // at least some cross-box matches surface.
+  const names = await decorateUsers(candidates.map((c) => c.user_id));
+  const seen = new Set();
+  const enriched = [];
+  for (const c of candidates) {
+    if (exclude.has(c.user_id) || seen.has(c.user_id)) continue;
+    const d = names.get(c.user_id);
+    if (!d || !d.display_name) continue;
+    seen.add(c.user_id);
+    enriched.push({ ...c, display_name: d.display_name, box_name: d.box_name, is_coach: !!d.is_coach,
+      same_box: !!(myBox && d.box_id === myBox), following: following.has(c.user_id) });
+  }
+  // Per-basis queues, box-first within each, then round-robin across the three
+  // bases so the result shows VARIETY (performance + struggle + journey) and a
+  // mix of box + cross-box rather than 8 of the same kind.
+  const BASES = ['similar_performance', 'shared_struggle', 'similar_journey'];
+  const queues = BASES.map((bas) => {
+    const mine = enriched.filter((m) => m.basis === bas);
+    const bx = mine.filter((m) => m.same_box), cm = mine.filter((m) => !m.same_box);
+    // Box-first but interleaved with community so cross-box matches surface too.
+    const q = []; while (bx.length || cm.length) { if (bx.length) q.push(bx.shift()); if (cm.length) q.push(cm.shift()); }
+    return q;
+  });
+  const matches = [];
+  let progressed = true;
+  while (matches.length < 8 && progressed) {
+    progressed = false;
+    for (const q of queues) {
+      if (q.length && matches.length < 8) { matches.push(q.shift()); progressed = true; }
+    }
+  }
+
+  res.json({
+    box_id: myBox, weakest_movement: weak ? weak.movement : null,
+    matches,
+  });
+}));
+
+// Training partners (persisted, mutual). Partners see each other's logs.
+app.get('/api/users/:userId/training-partners', wrap(async (req, res) => {
+  const { userId } = req.params;
+  if (!isUuid(userId)) return res.status(400).json({ error: 'Invalid user id.' });
+  const { rows } = await pool.query(
+    `SELECT CASE WHEN tp.a_user_id = $1 THEN tp.b_user_id ELSE tp.a_user_id END AS user_id,
+            tp.basis, tp.created_at,
+            COALESCE(NULLIF(p.display_name,''),'Athlete') AS display_name, p.avatar_url, b.name AS box_name,
+            (SELECT MAX(created_at) FROM results r WHERE r.user_id = CASE WHEN tp.a_user_id=$1 THEN tp.b_user_id ELSE tp.a_user_id END) AS last_trained
+       FROM training_partners tp
+       JOIN users u ON u.user_id = CASE WHEN tp.a_user_id = $1 THEN tp.b_user_id ELSE tp.a_user_id END
+       LEFT JOIN profiles p ON p.user_id = u.user_id ${BOX_LATERAL}
+      WHERE tp.a_user_id = $1 OR tp.b_user_id = $1
+      ORDER BY tp.created_at DESC`, [userId]);
+  res.json({ partners: rows });
+}));
+
+app.post('/api/training-partners', wrap(async (req, res) => {
+  const b = req.body || {};
+  const aId = b.aUserId || b.a_user_id || b.userId;
+  const bId = b.bUserId || b.b_user_id || b.partnerUserId;
+  if (!isUuid(aId) || !isUuid(bId)) return res.status(400).json({ error: 'Two valid user ids are required.' });
+  if (aId === bId) return res.status(400).json({ error: "You can't partner with yourself." });
+  const [lo, hi] = pair(aId, bId);
+  if (b.action === 'remove') {
+    await pool.query('DELETE FROM training_partners WHERE a_user_id = $1 AND b_user_id = $2', [lo, hi]);
+    return res.json({ ok: true, partners: false });
+  }
+  const ins = await pool.query(
+    `INSERT INTO training_partners (a_user_id, b_user_id, basis) VALUES ($1, $2, $3)
+       ON CONFLICT (a_user_id, b_user_id) DO NOTHING RETURNING a_user_id`, [lo, hi, (b.basis || '').slice(0, 80) || null]);
+  if (ins.rows[0]) {
+    const names = await decorateUsers([aId, bId]);
+    const an = names.get(aId), bn = names.get(bId);
+    // Feed event from the initiator celebrating the new partnership.
+    await pool.query(
+      `INSERT INTO feed_events (user_id, type, ref_id, payload) VALUES ($1, 'training_partner', $2, $3)`,
+      [aId, bId, JSON.stringify({ partner_name: bn ? bn.display_name : 'an athlete', partner_box: bn ? bn.box_name : null, you_name: an ? an.display_name : null })]);
+  }
+  res.status(201).json({ ok: true, partners: true });
+}));
+
+// High-five — a lightweight one-tap celebration (feed tie-in).
+app.post('/api/highfive', wrap(async (req, res) => {
+  const b = req.body || {};
+  const fromId = b.fromUserId || b.from_user_id || b.userId;
+  const toId = b.toUserId || b.to_user_id;
+  if (!isUuid(fromId) || !isUuid(toId) || fromId === toId) return res.status(400).json({ error: 'Valid from/to ids are required.' });
+  const names = await decorateUsers([fromId, toId]);
+  const to = names.get(toId);
+  await pool.query(
+    `INSERT INTO feed_events (user_id, type, ref_id, payload) VALUES ($1, 'highfive', $2, $3)`,
+    [fromId, toId, JSON.stringify({ to_name: to ? to.display_name : 'an athlete' })]);
+  res.status(201).json({ ok: true });
+}));
+
+// Head-to-head 1-on-1 matchups (a personal, two-athlete competition).
+function h2hMetricLabel(metric) { return metric === 'most_workouts' ? 'workouts' : 'avg score'; }
+
+async function h2hStanding(h) {
+  const { rows } = await pool.query(
+    `SELECT user_id, ROUND(AVG(holistic_score),1)::float8 AS avg, COUNT(*)::int AS n
+       FROM results WHERE user_id = ANY($1::uuid[]) AND created_at BETWEEN $2 AND $3 GROUP BY user_id`,
+    [[h.a_user_id, h.b_user_id], h.starts_at, h.ends_at]);
+  const by = Object.fromEntries(rows.map((r) => [r.user_id, r]));
+  const valOf = (uid) => { const r = by[uid]; if (!r) return 0; return h.metric === 'most_workouts' ? r.n : (r.avg || 0); };
+  return { a_value: valOf(h.a_user_id), b_value: valOf(h.b_user_id), unit: h2hMetricLabel(h.metric) };
+}
+
+app.get('/api/users/:userId/head-to-heads', wrap(async (req, res) => {
+  const { userId } = req.params;
+  if (!isUuid(userId)) return res.status(400).json({ error: 'Invalid user id.' });
+  const { rows: hs } = await pool.query(
+    `SELECT * FROM head_to_heads WHERE a_user_id = $1 OR b_user_id = $1 ORDER BY status, ends_at DESC LIMIT 20`, [userId]);
+  const names = await decorateUsers(hs.flatMap((h) => [h.a_user_id, h.b_user_id]));
+  const out = await Promise.all(hs.map(async (h) => {
+    const st = await h2hStanding(h);
+    const opp = h.a_user_id === userId ? h.b_user_id : h.a_user_id;
+    const meIsA = h.a_user_id === userId;
+    const od = names.get(opp) || {};
+    const now = Date.now();
+    const ends = new Date(h.ends_at).getTime();
+    return {
+      id: h.id, metric: h.metric, unit: st.unit, status: h.status, starts_at: h.starts_at, ends_at: h.ends_at,
+      ends_in_days: Math.max(0, Math.ceil((ends - now) / 86400000)),
+      opponent: { user_id: opp, display_name: od.display_name || 'Athlete', box_name: od.box_name },
+      my_value: meIsA ? st.a_value : st.b_value,
+      opp_value: meIsA ? st.b_value : st.a_value,
+      winner_user_id: h.winner_user_id,
+    };
+  }));
+  res.json({ head_to_heads: out });
+}));
+
+app.post('/api/head-to-heads', wrap(async (req, res) => {
+  const b = req.body || {};
+  const aId = b.aUserId || b.a_user_id || b.userId;
+  const bId = b.bUserId || b.b_user_id || b.opponentUserId;
+  if (!isUuid(aId) || !isUuid(bId) || aId === bId) return res.status(400).json({ error: 'Two valid user ids are required.' });
+  const metric = b.metric === 'most_workouts' ? 'most_workouts' : 'highest_avg';
+  const start = b.startsAt ? new Date(b.startsAt) : new Date();
+  const end = b.endsAt ? new Date(b.endsAt) : new Date(Date.now() + 7 * 86400000);
+  if (isNaN(start) || isNaN(end) || end <= start) return res.status(400).json({ error: 'Invalid start/end window.' });
+  const check = await pool.query('SELECT (SELECT 1 FROM users WHERE user_id=$1) AS a, (SELECT 1 FROM users WHERE user_id=$2) AS b', [aId, bId]);
+  if (!check.rows[0].a || !check.rows[0].b) return res.status(404).json({ error: 'Athlete not found.' });
+  const ins = await pool.query(
+    `INSERT INTO head_to_heads (a_user_id, b_user_id, metric, starts_at, ends_at, status)
+       VALUES ($1,$2,$3,$4,$5,'active') RETURNING id`, [aId, bId, metric, start.toISOString(), end.toISOString()]);
+  const names = await decorateUsers([aId, bId]);
+  const bn = names.get(bId);
+  await pool.query(
+    `INSERT INTO feed_events (user_id, type, ref_id, payload) VALUES ($1, 'h2h_start', $2, $3)`,
+    [aId, ins.rows[0].id, JSON.stringify({ opponent_name: bn ? bn.display_name : 'an athlete', metric, unit: h2hMetricLabel(metric) })]);
+  res.status(201).json({ ok: true, id: ins.rows[0].id });
+}));
+
 // ---- API: athlete training history + detail ---------------------------------
+const fmtClock = (s) => { s = Math.max(0, Math.round(Number(s) || 0)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
 const dminus = (str, n) => { const [y, m, d] = str.split('-').map(Number); return new Date(Date.UTC(y, m - 1, d - n)).toISOString().slice(0, 10); };
 const toDate = (v) => new Date(v).toISOString().slice(0, 10);
 
@@ -1400,6 +1839,9 @@ app.get('/api/health', wrap(async (req, res) => {
              (SELECT COUNT(*) FROM results)::int AS results,
              (SELECT COUNT(*) FROM feed_events)::int AS feed_events,
              (SELECT COUNT(*) FROM challenges)::int AS challenges,
+             (SELECT COUNT(*) FROM competitions)::int AS competitions,
+             (SELECT COUNT(*) FROM training_partners)::int AS training_partners,
+             (SELECT COUNT(*) FROM head_to_heads)::int AS head_to_heads,
              EXISTS (SELECT 1 FROM boxes WHERE name = $1) AS world_seeded`, [SEED_SENTINEL_BOX]);
     counts = r.rows[0];
   } catch (e) { counts = { error: e.message }; }
