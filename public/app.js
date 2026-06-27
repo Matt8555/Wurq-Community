@@ -114,7 +114,7 @@ const NAV_ATHLETE = [
   ['community', '❖', 'Community'], ['feed', '✦', 'Feed'], ['profile', '◉', 'Profile'],
 ];
 const NAV_OWNER = [
-  ['home', '◧', 'Home'], ['compete', '≡', 'Compete'],
+  ['home', '◧', 'Home'], ['business', '$', 'Business'], ['compete', '≡', 'Compete'],
   ['throwdown', '⚔', 'Throwdown'], ['engage', '✦', 'Engage'],
 ];
 
@@ -882,6 +882,12 @@ function feedText(ev) {
   if (ev.type === 'highfive') {
     return `${name} high-fived <span class="accent">${escapeHtml(p.to_name || 'an athlete')}</span> ✋`;
   }
+  if (ev.type === 'commit_made') {
+    return `${name} ${p.by_coach ? 'took the coach up on it' : 'made a commitment'} ✊<div class="feed-post">${escapeHtml(p.target || '')}</div>`;
+  }
+  if (ev.type === 'commit_kept') {
+    return `${name} kept ${p.by_coach ? "their coach's" : 'a'} commitment 🎯 <span class="accent">followed through!</span><div class="feed-post">${escapeHtml(p.target || '')}</div>`;
+  }
   return `${name} did something`;
 }
 
@@ -1100,6 +1106,10 @@ async function renderCommunityHub(container) {
   const wrap = el(`
     <div>
       ${goal ? teamGoalCardHtml(goal) : ''}
+      <div class="commit-cta" id="commitCta">
+        <div class="cc-l"><div class="cc-t">🎯 Commitments</div><div class="cc-s" id="commitRally">Loading…</div></div>
+        <span class="cc-go">Make one →</span>
+      </div>
       <button class="btn-primary" id="bringFriend">🤝 Bring a friend — grow your box</button>
       <button class="btn-outline wide" id="giveShout">🙌 Give a shout-out</button>
       <div id="shoutComposer"></div>
@@ -1151,6 +1161,14 @@ async function renderCommunityHub(container) {
   wrap.querySelector('#giveShout').addEventListener('click', () =>
     openShoutComposer(wrap.querySelector('#shoutComposer'), members));
   wrap.querySelector('#bringFriend').addEventListener('click', () => renderReferral());
+  wrap.querySelector('#commitCta').addEventListener('click', () => renderCommitments());
+  (async () => {
+    try {
+      const s = await api('GET', `/api/box/${boxId}/commitment-stats`);
+      const r = wrap.querySelector('#commitRally');
+      if (r) r.textContent = `${s.committed} member${s.committed === 1 ? '' : 's'} committed this week · ${s.kept_this_week} kept`;
+    } catch (_) { const r = wrap.querySelector('#commitRally'); if (r) r.textContent = 'Make a public commitment'; }
+  })();
 }
 
 // "Bring a friend" — referral screen.
@@ -1564,6 +1582,7 @@ async function renderOwner() {
       return;
     }
   }
+  if (ownerView === 'business') return renderOwnerBusiness();
   if (ownerView === 'compete') return renderOwnerCompete();
   if (ownerView === 'throwdown') return renderOwnerThrowdown();
   if (ownerView === 'engage') return renderOwnerEngage();
@@ -1701,6 +1720,115 @@ async function renderManageCoaches() {
     }));
   };
   render();
+}
+
+// ---- Owner business dashboard (plain-language financial clarity) -------------
+const money = (n) => '$' + Math.round(Number(n) || 0).toLocaleString();
+
+async function renderOwnerBusiness() {
+  setScreenName('Business');
+  content.innerHTML = '<p class="subtitle">Loading your numbers…</p>';
+  const boxId = ownerBox.box_id;
+  let d, leaders;
+  try {
+    [d, leaders] = await Promise.all([
+      api('GET', `/api/owner/box/${boxId}/business`),
+      api('GET', `/api/box/${boxId}/referral-leaderboard`).then((r) => r.leaders).catch(() => []),
+    ]);
+  } catch (e) { content.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+
+  const ch = d.churn, acq = d.acquisition, f = d.funnel;
+  const above = d.above_break_even;
+  const churnTone = ch.pct <= ch.target ? 'good' : ch.pct <= ch.benchmark ? 'ok' : 'warn';
+  const churnMsg = ch.pct <= ch.target ? "that's excellent — well below target"
+    : ch.pct <= ch.benchmark ? "you're better than the industry average" : "above the industry average — worth a push";
+
+  content.innerHTML = '';
+  const wrap = el(`
+    <div>
+      <h1 class="title">Your business</h1>
+      <p class="subtitle">Plain numbers, no spreadsheet. We filled in what we know — you tweak the rest.</p>
+
+      <div class="biz-hero ${above >= 0 ? 'good' : 'warn'}">
+        <div class="bh-lab">Break-even</div>
+        <div class="bh-line">You need <b>${d.break_even ?? '—'}</b> members to cover costs.</div>
+        <div class="bh-big">You have <b>${d.members}</b> — ${above >= 0 ? `<span class="up">${above} above break-even 🎉</span>` : `<span class="down">${Math.abs(above)} short</span>`}</div>
+      </div>
+
+      <div class="biz-grid">
+        <div class="biz-stat"><div class="bs-v">${money(d.revenue)}</div><div class="bs-l">Monthly revenue</div></div>
+        <div class="biz-stat"><div class="bs-v">${money(d.overhead)}</div><div class="bs-l">Monthly overhead</div></div>
+        <div class="biz-stat ${d.profit >= 0 ? 'pos' : 'neg'}"><div class="bs-v">${money(d.profit)}</div><div class="bs-l">Monthly margin (${d.margin_pct}%)</div></div>
+      </div>
+
+      <div class="sec-title">🔁 Keeping members (retention)</div>
+      <div class="card biz-churn ${churnTone}">
+        <div class="churn-row">
+          <div class="churn-big">${ch.pct}%</div>
+          <div class="churn-meta"><div class="cm-1">monthly churn</div><div class="cm-2">${ch.retention_pct}% retention · ${ch.lapsed} of ${ch.established} went quiet</div></div>
+        </div>
+        <div class="churn-scale"><span class="cs-target">target &lt;${ch.target}%</span><span class="cs-bench">industry ~${ch.benchmark}%</span></div>
+        <div class="churn-msg">${churnMsg}. Keeping a member costs <b>5–25× less</b> than finding a new one — small retention wins pay off big.</div>
+      </div>
+
+      <div class="sec-title">📣 Cost to get a member (CAC)</div>
+      <div class="card">
+        <div class="cac-row"><div class="cac-v">${acq.cac != null ? money(acq.cac) : '—'}</div>
+          <div class="cac-l">per new member<br/><span class="muted-note">${money(acq.marketing_spend)} marketing ÷ ${acq.new_members} new this month</span></div></div>
+        <div class="cac-ref">🤝 <b>${acq.referred_new}</b> of your ${acq.new_members} new members came from referrals — a referred member costs you <b>almost nothing</b>. It's your cheapest, best channel.</div>
+      </div>
+
+      <div class="sec-title">🌱 Member-driven growth (referral funnel)</div>
+      <div class="funnel">
+        <div class="fn-step"><div class="fn-v">${f.invites}</div><div class="fn-l">invites sent</div></div>
+        <div class="fn-arrow">→</div>
+        <div class="fn-step"><div class="fn-v">${f.pending}</div><div class="fn-l">pending</div></div>
+        <div class="fn-arrow">→</div>
+        <div class="fn-step joined"><div class="fn-v">${f.joined}</div><div class="fn-l">joined</div></div>
+      </div>
+      <div class="sec-title">🏆 Top recruiters</div>
+      <div id="recruiters"></div>
+
+      <div class="sec-title">⚙️ Your inputs <span class="muted-note" style="font-weight:400">tap to adjust</span></div>
+      <button class="btn-outline wide" id="editInputs">Edit costs &amp; pricing</button>
+      <div id="inputsForm"></div>
+    </div>`);
+  content.appendChild(wrap);
+
+  const rEl = wrap.querySelector('#recruiters');
+  const recr = leaders.filter((l) => l.joined > 0).slice(0, 6);
+  if (!recr.length) rEl.appendChild(el('<div class="muted-note">No referrals yet — encourage members to invite friends.</div>'));
+  recr.forEach((l, i) => rEl.appendChild(el(`
+    <div class="lb-row"><div class="lb-rank">${i + 1}</div>
+      <div class="lb-main"><div class="lb-name">${escapeHtml(l.display_name)}</div><div class="lb-sub">${l.joined} joined</div></div>
+      <div class="lb-score"><div class="s">${l.points}</div><div class="t">pts</div></div></div>`)));
+
+  wrap.querySelector('#editInputs').addEventListener('click', () => {
+    const host = wrap.querySelector('#inputsForm');
+    if (host.childElementCount) { host.innerHTML = ''; return; }
+    const i = d.inputs;
+    const fld = (k, lbl, hint) => `<label class="field"><span class="lbl">${lbl}</span>
+      <input type="number" min="0" id="bf_${k}" value="${Math.round(i[k])}" />${hint ? `<span class="hint">${hint}</span>` : ''}</label>`;
+    host.appendChild(el(`<div class="card">
+      ${fld('rent', 'Rent / month', 'usually the big one')}
+      ${fld('staff', 'Staff / month')}
+      ${fld('insurance', 'Insurance / month')}
+      ${fld('equipment', 'Equipment / month')}
+      ${fld('affiliate_fee', 'CrossFit affiliate fee / month')}
+      ${fld('software', 'Software / month')}
+      ${fld('membership_price', 'Average membership price')}
+      ${fld('marketing_spend', 'Marketing spend / month')}
+      <button class="btn-primary" id="saveBf">Save &amp; recompute</button>
+      <div class="error" id="bfErr"></div>
+    </div>`));
+    host.querySelector('#saveBf').addEventListener('click', async () => {
+      const payload = {};
+      ['rent', 'staff', 'insurance', 'equipment', 'affiliate_fee', 'software', 'membership_price', 'marketing_spend']
+        .forEach((k) => { payload[k] = Number(host.querySelector(`#bf_${k}`).value); });
+      try { await api('PUT', `/api/owner/box/${boxId}/business`, payload); showToast('Updated ✓'); renderOwnerBusiness(); }
+      catch (e) { host.querySelector('#bfErr').textContent = e.message; }
+    });
+  });
 }
 
 async function renderOwnerCompete() {
@@ -1904,9 +2032,13 @@ async function renderCoach() {
   if (!profile || !profile.box_id) { needBoxPrompt('Set your gym / box to use coach tools.'); return; }
   const boxId = profile.box_id;
   content.innerHTML = '<p class="subtitle">Loading roster…</p>';
-  let roster;
-  try { roster = await api('GET', `/api/box/${boxId}/roster?userId=${userId}`); }
-  catch (e) { content.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+  let roster, commits;
+  try {
+    [roster, commits] = await Promise.all([
+      api('GET', `/api/box/${boxId}/roster?userId=${userId}`),
+      api('GET', `/api/box/${boxId}/commitments?userId=${userId}`).catch(() => null),
+    ]);
+  } catch (e) { content.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
 
   content.innerHTML = '';
   const wrap = el(`
@@ -1942,6 +2074,26 @@ async function renderCoach() {
         <div class="error" id="annErr"></div>
       </div>
 
+      ${commits ? `<div class="sec-title">🎯 Accountability</div>
+      <div class="coach-stats">
+        <div class="cstat"><div class="n">${commits.summary.active}</div><div class="l">committed</div></div>
+        <div class="cstat"><div class="n">${commits.summary.kept}</div><div class="l">kept</div></div>
+        <div class="cstat warn"><div class="n">${commits.summary.at_risk}</div><div class="l">missed · at-risk</div></div>
+      </div>
+      <div class="card">
+        <label class="field"><span class="lbl">Ask an athlete to commit</span>
+          <select id="askWho"><option value="">Choose a member…</option></select></label>
+        <label class="field"><span class="lbl">Commitment</span>
+          <select id="askWhat">
+            <option value="2">2× per week</option>
+            <option value="3">3× per week</option>
+          </select></label>
+        <button class="btn-primary" id="askSend">Ask to commit</button>
+        <div class="error" id="askErr"></div>
+      </div>
+      ${commits.missed.length ? '<div class="sub-lab danger-title">⚠ Missed — reach out</div><div id="atRisk"></div>' : ''}
+      ${commits.active.length ? '<div class="sub-lab">In flight</div><div id="cActive"></div>' : ''}` : ''}
+
       <div class="sec-title">👥 My athletes <span class="muted-note" style="font-weight:400">tap for detail</span></div>
       <div id="roster"></div>
     </div>
@@ -1949,6 +2101,32 @@ async function renderCoach() {
   content.appendChild(wrap);
 
   wrap.querySelector('#cBack').addEventListener('click', () => renderRichProfile());
+
+  if (commits) {
+    const sel = wrap.querySelector('#askWho');
+    roster.members.filter((m) => !m.is_coach).forEach((m) => sel.appendChild(el(`<option value="${m.user_id}">${escapeHtml(m.display_name)}</option>`)));
+    const askErr = wrap.querySelector('#askErr');
+    wrap.querySelector('#askSend').addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      askErr.textContent = '';
+      const who = sel.value, n = wrap.querySelector('#askWhat').value;
+      if (!who) { askErr.textContent = 'Pick a member.'; return; }
+      btn.disabled = true; btn.textContent = 'Sending…';
+      try {
+        await api('POST', '/api/commitments/coach-request', { coachId: userId, userId: who, type: 'weekly_count', target: `Coach asked: ${n}x/week`, goalCount: Number(n) });
+        showToast('Ask sent — they\'ll accept or decline 🙌');
+        btn.textContent = 'Asked ✓'; setTimeout(() => { btn.disabled = false; btn.textContent = 'Ask to commit'; }, 1500);
+      } catch (err) { askErr.textContent = err.message; btn.disabled = false; btn.textContent = 'Ask to commit'; }
+    });
+    const ar = wrap.querySelector('#atRisk');
+    if (ar) commits.missed.slice(0, 8).forEach((c) => ar.appendChild(el(`
+      <div class="list-row warn"><div class="lr-main"><div class="nm">${escapeHtml(c.display_name)}</div>
+        <div class="meta">missed: ${escapeHtml(c.target)}</div></div><div class="pill-warn">at-risk</div></div>`)));
+    const ca = wrap.querySelector('#cActive');
+    if (ca) commits.active.slice(0, 10).forEach((c) => ca.appendChild(el(`
+      <div class="list-row"><div class="lr-main"><div class="nm">${escapeHtml(c.display_name)}${c.created_by === 'coach' ? ' <span class="coach-ask-tag">coach ask</span>' : ''}</div>
+        <div class="meta">${escapeHtml(c.target)} · ${c.progress || 0}/${c.goal}</div></div><div class="pill-hot">${c.progress || 0}/${c.goal}</div></div>`)));
+  }
 
   // Pre-fill from today's programmed WOD if any.
   (async () => {
@@ -2384,6 +2562,117 @@ async function renderMatchesInto(container) {
     });
     mEl.appendChild(card);
   });
+}
+
+// ============================================================================
+// Commitments — public accountability for members
+// ============================================================================
+const COMMIT_PRESETS = [
+  { type: 'session', target: "I'll be at 5am tomorrow 💪", goalCount: 1, period: 'day', label: '🌅 5am tomorrow' },
+  { type: 'weekly_count', target: 'Commit to 2x this week', goalCount: 2, period: 'week', label: '2× this week' },
+  { type: 'weekly_count', target: 'Commit to 3x this week', goalCount: 3, period: 'week', label: '3× this week' },
+  { type: 'streak', target: '30-day streak', goalCount: 30, period: 'month', label: '🔥 30-day streak' },
+];
+
+async function renderCommitments() {
+  setScreenName('Commitments');
+  if (!userId) return setView('profile');
+  content.innerHTML = '<p class="subtitle">Loading…</p>';
+  let d, stats;
+  try {
+    [d, stats] = await Promise.all([
+      api('GET', `/api/users/${userId}/commitments`),
+      profile && profile.box_id ? api('GET', `/api/box/${profile.box_id}/commitment-stats`) : Promise.resolve(null),
+    ]);
+  } catch (e) { content.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+
+  const active = d.commitments.filter((c) => c.status === 'active');
+  const history = d.commitments.filter((c) => c.status === 'kept' || c.status === 'missed');
+  content.innerHTML = '';
+  const wrap = el(`
+    <div>
+      <button class="back-link" id="cmBack">← Community</button>
+      <h1 class="title">Commitments</h1>
+      <p class="subtitle">Say it out loud — public commitments get kept.</p>
+
+      ${stats ? `<div class="rally">🔥 <b>${stats.committed}</b> member${stats.committed === 1 ? '' : 's'} committed this week · <b>${stats.kept_this_week}</b> kept so far</div>` : ''}
+
+      <div class="commit-mine">
+        <div class="cmi"><div class="cmi-v">${d.follow_through_rate == null ? '—' : d.follow_through_rate + '%'}</div><div class="cmi-l">follow-through</div></div>
+        <div class="cmi"><div class="cmi-v">${d.active_count}</div><div class="cmi-l">active</div></div>
+        <div class="cmi"><div class="cmi-v">${d.kept_count}</div><div class="cmi-l">kept</div></div>
+      </div>
+
+      ${d.pending.length ? `<div class="sec-title">🙋 Your coach asked</div><div id="pending"></div>` : ''}
+
+      <div class="sec-title">Make a commitment</div>
+      <div class="commit-presets" id="presets"></div>
+      <div class="card">
+        <label class="field"><span class="lbl">Or write your own</span>
+          <input type="text" id="cmText" placeholder="e.g. I'll PR my back squat this month" maxlength="120" /></label>
+        <button class="btn-primary" id="cmSave">Commit publicly</button>
+        <div class="error" id="cmErr"></div>
+      </div>
+
+      <div class="sec-title">Your active commitments</div>
+      <div id="active"></div>
+      ${history.length ? `<div class="sec-title">History</div><div id="history"></div>` : ''}
+    </div>`);
+  content.appendChild(wrap);
+  wrap.querySelector('#cmBack').addEventListener('click', () => setView('community'));
+
+  // Pending coach requests — accept / decline.
+  const pEl = wrap.querySelector('#pending');
+  if (pEl) d.pending.forEach((c) => {
+    const row = el(`
+      <div class="card commit-pending">
+        <div class="cp-text">Coach <b>${escapeHtml(c.coach_name || 'Coach')}</b> asks: <b>${escapeHtml(c.target)}</b></div>
+        <div class="cp-actions"><button class="btn-primary" data-a="accept">Accept</button><button class="btn-outline" data-a="decline">Decline</button></div>
+      </div>`);
+    row.querySelectorAll('button').forEach((btn) => btn.addEventListener('click', async () => {
+      try { await api('POST', `/api/commitments/${c.id}/respond`, { userId, action: btn.dataset.a });
+        showToast(btn.dataset.a === 'accept' ? 'Committed ✊' : 'Declined'); renderCommitments(); }
+      catch (e) { showToast(e.message); }
+    }));
+    pEl.appendChild(row);
+  });
+
+  // Quick presets.
+  const prEl = wrap.querySelector('#presets');
+  COMMIT_PRESETS.forEach((p) => {
+    const b = el(`<button class="preset-chip">${escapeHtml(p.label)}</button>`);
+    b.addEventListener('click', () => makeCommitment(p));
+    prEl.appendChild(b);
+  });
+  async function makeCommitment(payload) {
+    try { await api('POST', '/api/commitments', { userId, ...payload }); showToast('Committed publicly ✊'); renderCommitments(); }
+    catch (e) { showToast(e.message); }
+  }
+  wrap.querySelector('#cmSave').addEventListener('click', () => {
+    const text = wrap.querySelector('#cmText').value.trim();
+    if (!text) { wrap.querySelector('#cmErr').textContent = 'Write what you\'re committing to.'; return; }
+    makeCommitment({ type: 'custom', target: text, goalCount: 1, period: 'week' });
+  });
+
+  const aEl = wrap.querySelector('#active');
+  if (!active.length) aEl.appendChild(el('<div class="muted-note">No active commitments — make one above.</div>'));
+  active.forEach((c) => {
+    const pct = Math.min(100, Math.round(((c.progress || 0) / (c.goal || 1)) * 100));
+    aEl.appendChild(el(`
+      <div class="commit-row">
+        <div class="cr-main"><div class="nm">${escapeHtml(c.target)}${c.created_by === 'coach' ? ' <span class="coach-ask-tag">coach</span>' : ''}</div>
+          <div class="commit-bar"><span style="width:${pct}%"></span></div>
+          <div class="meta">${c.progress || 0} / ${c.goal} · due ${fmtRemaining(c.due_at)}</div></div>
+      </div>`));
+  });
+
+  const hEl = wrap.querySelector('#history');
+  if (hEl) history.forEach((c) => hEl.appendChild(el(`
+    <div class="commit-row ${c.status}">
+      <div class="cr-main"><div class="nm">${escapeHtml(c.target)}</div>
+        <div class="meta">${c.status === 'kept' ? '✓ kept' : '✗ missed'}</div></div>
+      <div class="${c.status === 'kept' ? 'pill-hot' : 'pill-warn'}">${c.status === 'kept' ? 'kept 🎯' : 'missed'}</div>
+    </div>`)));
 }
 
 // ---- bootstrap --------------------------------------------------------------

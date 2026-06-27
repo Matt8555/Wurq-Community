@@ -715,6 +715,76 @@
     .h2h-lead { color: var(--acid); font-weight: 800; font-size: 0.74rem; }
     .h2h-foot { text-align: center; margin-top: 4px; }
 
+    /* ---- Owner business dashboard ---- */
+    .sub-lab { font-size: 0.78rem; font-weight: 800; color: var(--muted); text-transform: uppercase;
+      letter-spacing: 0.05em; margin: 14px 0 8px; }
+    .sub-lab.danger-title { color: var(--danger); }
+    .biz-hero { border-radius: 16px; padding: 16px; margin-bottom: 14px; border: 1px solid var(--border); background: var(--surface); }
+    .biz-hero.good { border-color: var(--acid); background: linear-gradient(135deg, var(--acid-dim), var(--surface)); }
+    .biz-hero.warn { border-color: var(--danger); }
+    .biz-hero .bh-lab { font-size: 0.72rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+    .biz-hero .bh-line { font-size: 0.95rem; margin-top: 6px; } .biz-hero .bh-line b { color: var(--chalk); }
+    .biz-hero .bh-big { font-size: 1.25rem; font-weight: 800; margin-top: 4px; }
+    .biz-hero .up { color: var(--acid); } .biz-hero .down { color: var(--danger); }
+
+    .biz-grid { display: flex; gap: 10px; margin-bottom: 6px; }
+    .biz-stat { flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px; text-align: center; }
+    .biz-stat .bs-v { font-size: 1.25rem; font-weight: 900; }
+    .biz-stat .bs-l { font-size: 0.66rem; color: var(--muted); margin-top: 3px; }
+    .biz-stat.pos .bs-v { color: var(--acid); } .biz-stat.neg .bs-v { color: var(--danger); }
+
+    .biz-churn.good { border-color: var(--acid); } .biz-churn.warn { border-color: #ffb86b66; }
+    .churn-row { display: flex; align-items: center; gap: 14px; }
+    .churn-big { font-size: 2.1rem; font-weight: 900; }
+    .biz-churn.good .churn-big { color: var(--acid); } .biz-churn.warn .churn-big { color: #ffb86b; }
+    .churn-meta .cm-1 { font-weight: 700; font-size: 0.85rem; } .churn-meta .cm-2 { color: var(--muted); font-size: 0.74rem; }
+    .churn-scale { display: flex; justify-content: space-between; margin: 10px 0; font-size: 0.7rem; color: var(--muted);
+      border-top: 1px dashed var(--border); border-bottom: 1px dashed var(--border); padding: 6px 0; }
+    .churn-scale .cs-target { color: var(--acid); } .churn-msg { font-size: 0.8rem; color: var(--chalk); line-height: 1.5; }
+    .churn-msg b { color: var(--acid); }
+
+    .cac-row { display: flex; align-items: center; gap: 14px; }
+    .cac-v { font-size: 1.9rem; font-weight: 900; }
+    .cac-l { font-size: 0.82rem; }
+    .cac-ref { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); font-size: 0.82rem; color: var(--chalk); line-height: 1.5; }
+    .cac-ref b { color: var(--acid); }
+
+    .funnel { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+    .funnel .fn-step { flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 6px; text-align: center; }
+    .funnel .fn-step.joined { border-color: var(--acid); background: var(--acid-dim); }
+    .funnel .fn-v { font-size: 1.4rem; font-weight: 900; } .funnel .fn-step.joined .fn-v { color: var(--acid); }
+    .funnel .fn-l { font-size: 0.64rem; color: var(--muted); margin-top: 2px; }
+    .funnel .fn-arrow { color: var(--muted); flex: none; }
+
+    /* ---- Commitments ---- */
+    .commit-cta { display: flex; align-items: center; gap: 10px; background: var(--surface); border: 1px solid var(--acid);
+      border-radius: 14px; padding: 13px; margin-bottom: 12px; cursor: pointer; }
+    .commit-cta .cc-l { flex: 1; min-width: 0; } .commit-cta .cc-t { font-weight: 800; font-size: 0.92rem; }
+    .commit-cta .cc-s { color: var(--muted); font-size: 0.74rem; margin-top: 2px; }
+    .commit-cta .cc-go { color: var(--acid); font-weight: 800; font-size: 0.8rem; flex: none; }
+    .rally { background: var(--acid-dim); border: 1px solid var(--acid); border-radius: 12px; padding: 11px 13px;
+      font-size: 0.86rem; margin-bottom: 14px; } .rally b { color: var(--acid); }
+    .commit-mine { display: flex; gap: 10px; margin-bottom: 6px; }
+    .commit-mine .cmi { flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px; text-align: center; }
+    .commit-mine .cmi-v { font-size: 1.4rem; font-weight: 900; } .commit-mine .cmi-l { font-size: 0.66rem; color: var(--muted); margin-top: 2px; }
+    .commit-presets { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+    .preset-chip { background: var(--surface-2); border: 1px solid var(--border); color: var(--chalk);
+      border-radius: 999px; padding: 8px 13px; font-size: 0.8rem; font-weight: 700; cursor: pointer; }
+    .preset-chip:active { background: var(--acid); color: #10130a; }
+    .commit-pending { border-color: var(--acid); }
+    .commit-pending .cp-text { font-size: 0.86rem; margin-bottom: 10px; }
+    .commit-pending .cp-actions { display: flex; gap: 8px; }
+    .commit-pending .cp-actions button { flex: 1; }
+    .commit-row { display: flex; align-items: center; gap: 11px; background: var(--surface); border: 1px solid var(--border);
+      border-radius: 12px; padding: 11px 13px; margin-bottom: 8px; }
+    .commit-row .cr-main { flex: 1; min-width: 0; } .commit-row .nm { font-weight: 700; font-size: 0.88rem; }
+    .commit-row .meta { color: var(--muted); font-size: 0.72rem; margin-top: 3px; }
+    .commit-row.missed { opacity: 0.75; }
+    .commit-bar { height: 7px; background: var(--surface-2); border-radius: 999px; overflow: hidden; margin: 6px 0; }
+    .commit-bar span { display: block; height: 100%; background: var(--acid); border-radius: 999px; }
+    .coach-ask-tag { display: inline-block; background: var(--surface-2); color: #7cd4ff; border: 1px solid #7cd4ff55;
+      font-size: 0.6rem; font-weight: 800; text-transform: uppercase; padding: 1px 6px; border-radius: 5px; vertical-align: middle; }
+
     .hidden { display: none !important; }
   </style>
 </head>

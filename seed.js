@@ -423,6 +423,8 @@ async function main() {
     await client.query('BEGIN');
 
     // Reset the world (deterministic rebuild). FK-safe order.
+    await client.query('DELETE FROM commitments');
+    await client.query('DELETE FROM box_finances');
     await client.query('DELETE FROM head_to_heads');
     await client.query('DELETE FROM training_partners');
     await client.query('DELETE FROM competitions');
@@ -886,6 +888,71 @@ async function main() {
     }
     await bulkInsert(client, 'feed_events', ['user_id', 'type', 'payload', 'kudos', 'created_at'], h2hFeed);
 
+    // ---- Owner business: box finances (the inputs the data can't know). -------
+    for (const box of BOX_DEFS) {
+      const boxId = boxIds[box.name];
+      const home = box.name === HOME_BOX;
+      // Home box tuned so the break-even story lands (~14 above break-even);
+      // other boxes get plausible numbers scaled a little by personality.
+      const jig = (n) => Math.round(n * (0.9 + frng() * 0.25));
+      const f = home
+        ? { rent: 7800, insurance: 350, equipment: 300, staff: 4200, affiliate_fee: 250, software: 150, membership_price: 145, marketing_spend: 600 }
+        : { rent: jig(7500), insurance: jig(360), equipment: jig(320), staff: jig(4300), affiliate_fee: 250, software: jig(170), membership_price: 140 + Math.floor(frng() * 25), marketing_spend: jig(650) };
+      await client.query(
+        `INSERT INTO box_finances (box_id, rent, insurance, equipment, staff, affiliate_fee, software, membership_price, marketing_spend)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (box_id) DO NOTHING`,
+        [boxId, f.rent, f.insurance, f.equipment, f.staff, f.affiliate_fee, f.software, f.membership_price, f.marketing_spend]);
+    }
+
+    // ---- Commitment mechanics — active / kept / missed, self + coach-requested.
+    const tsAhead = (d) => `${dayStr(-d)} 12:00:00`; // d days in the FUTURE
+    const commitFeed = [];
+    const homeRoster = athletes.filter((a) => a.boxName === HOME_BOX && a !== matt && a !== alex && a.results.length >= 3);
+    const pickN = (arr, n, off = 0) => arr.slice(off, off + n);
+    let ci = 0;
+    const insertCommit = async (u, { type, target, goal = 1, period = 'week', status, createdBy = 'self', coachU = null, createdK, dueAt, feedKept }) => {
+      if (!u) return;
+      const { rows } = await client.query(
+        `INSERT INTO commitments (user_id, box_id, type, target, goal_count, period, status, created_by, coach_id, created_at, due_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+        [u.userId, borderId, type, target, goal, period, status, createdBy, coachU ? coachU.userId : null, ts(createdK), dueAt]);
+      if (status === 'active' && createdBy === 'self') commitFeed.push([u.userId, 'commit_made', JSON.stringify({ target, seed: 'true' }), 2 + Math.floor(frng() * 9), ts(Math.floor(frng() * 2))]);
+      if (status === 'active' && createdBy === 'coach') commitFeed.push([u.userId, 'commit_made', JSON.stringify({ target, by_coach: true, seed: 'true' }), 3 + Math.floor(frng() * 8), ts(Math.floor(frng() * 2))]);
+      if (feedKept) commitFeed.push([u.userId, 'commit_kept', JSON.stringify({ target, by_coach: createdBy === 'coach', seed: 'true' }), 5 + Math.floor(frng() * 18), ts(Math.floor(frng() * 3))]);
+    };
+    const SELF_TARGETS = [
+      { type: 'session', target: "I'll be at 5am tomorrow 💪", goal: 1, period: 'day' },
+      { type: 'weekly_count', target: 'Commit to 2x this week', goal: 2 },
+      { type: 'weekly_count', target: 'Commit to 3x this week', goal: 3 },
+      { type: 'streak', target: '30-day streak', goal: 30, period: 'month' },
+    ];
+    // Active self-commits (created today so they're genuinely in-flight).
+    for (let i = 0; i < 8; i++) {
+      const u = homeRoster[i]; const t = SELF_TARGETS[i % SELF_TARGETS.length];
+      await insertCommit(u, { ...t, status: 'active', createdK: 0, dueAt: tsAhead(t.period === 'day' ? 1 : t.period === 'month' ? 25 : 4) });
+    }
+    // Kept (past, met) — celebratory feed events.
+    for (const u of pickN(homeRoster, 6, 8)) {
+      await insertCommit(u, { type: 'weekly_count', target: 'Hit 2x last week', goal: 2, status: 'kept', createdK: 9, dueAt: ts(2), feedKept: true });
+    }
+    // Missed (past, not met) — at-risk signals the coach sees.
+    for (const u of pickN(homeRoster, 4, 14)) {
+      await insertCommit(u, { type: 'weekly_count', target: 'Commit to 3x', goal: 3, status: 'missed', createdK: 11, dueAt: ts(3) });
+    }
+    // Coach-requested ACCEPTED (active) — matt asked two members who said yes.
+    for (const u of pickN(homeRoster, 2, 18)) {
+      await insertCommit(u, { type: 'weekly_count', target: 'Coach asked: 2x/week', goal: 2, status: 'active', createdBy: 'coach', coachU: matt, createdK: 0, dueAt: tsAhead(5) });
+    }
+    // Coach-requested KEPT — one member already followed through on a coach ask.
+    await insertCommit(pickN(homeRoster, 1, 20)[0], { type: 'weekly_count', target: 'Coach asked: 2x/week', goal: 2, status: 'kept', createdBy: 'coach', coachU: matt, createdK: 9, dueAt: ts(2), feedKept: true });
+    // Demo logins: matt self-commits (active) + a kept one; alex has a PENDING
+    // coach request from matt to accept, and a kept commitment.
+    await insertCommit(matt, { type: 'weekly_count', target: 'Commit to 3x this week', goal: 3, status: 'active', createdK: 0, dueAt: tsAhead(4) });
+    await insertCommit(matt, { type: 'session', target: 'Showed up at 5am', goal: 1, period: 'day', status: 'kept', createdK: 4, dueAt: ts(3), feedKept: true });
+    await insertCommit(alex, { type: 'weekly_count', target: 'Coach asked: commit to 2x/week', goal: 2, status: 'pending', createdBy: 'coach', coachU: matt, createdK: 0, dueAt: tsAhead(6) });
+    await insertCommit(alex, { type: 'weekly_count', target: 'Hit 3x last week', goal: 3, status: 'kept', createdK: 9, dueAt: ts(2), feedKept: true });
+    await bulkInsert(client, 'feed_events', ['user_id', 'type', 'payload', 'kudos', 'created_at'], commitFeed);
+
     await client.query('COMMIT');
   } catch (e) {
     await client.query('ROLLBACK');
@@ -903,12 +970,15 @@ async function main() {
            (SELECT COUNT(*) FROM competitions)::int AS competitions,
            (SELECT COUNT(*) FROM training_partners)::int AS partners,
            (SELECT COUNT(*) FROM head_to_heads)::int AS h2h,
+           (SELECT COUNT(*) FROM commitments)::int AS commitments,
+           (SELECT COUNT(*) FROM box_finances)::int AS finances,
            (SELECT COUNT(*) FROM feed_events)::int AS feed,
            (SELECT COUNT(*) FROM user_badges)::int AS badges`);
   const c = t.rows[0];
   console.log(`[seed] world rebuilt — ${c.boxes} boxes, ${c.athletes} athletes, ${c.results} results, ` +
     `${c.workouts} workouts, ${c.challenges} challenges, ${c.competitions} competitions, ` +
-    `${c.partners} training partners, ${c.h2h} head-to-heads, ${c.feed} feed events, ${c.badges} badge awards.`);
+    `${c.partners} training partners, ${c.h2h} head-to-heads, ${c.commitments} commitments, ` +
+    `${c.finances} box finances, ${c.feed} feed events, ${c.badges} badge awards.`);
   console.log(`[seed] Demo box: "${HOME_BOX}". Demo logins: ${DEMO_ATHLETES.map((p) => `${p.email} (${p.name})`).join(', ')}.`);
 }
 

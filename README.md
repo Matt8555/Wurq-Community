@@ -14,7 +14,7 @@ Postgres.
 Tables: `users`, `profiles`, `identities`, `boxes`, `box_memberships`,
 `box_roles`, `workouts`, `results`, `badges`, `user_badges`, `feed_events`,
 `squads`, `squad_members`, `follows`, `referrals`, `challenges`, `competitions`,
-`training_partners`, `head_to_heads`. The `identities`
+`training_partners`, `head_to_heads`, `box_finances`, `commitments`. The `identities`
 table lets you link other identity sources later (Shopify, Circle, watch, …)
 **without restructuring** — each source just adds a row keyed by `user_id`.
 
@@ -122,6 +122,52 @@ one file so they are easy to tune.
 | POST | `/api/highfive` | One-tap high-five (`fromUserId`, `toUserId`); writes a `highfive` feed event. |
 | GET | `/api/users/:userId/head-to-heads` | A user's 1-on-1 matchups with live scores (your value vs theirs) and days remaining. |
 | POST | `/api/head-to-heads` | Start a head-to-head (`aUserId`, `bUserId`, `metric`, `startsAt`, `endsAt`); writes an `h2h_start` feed event. |
+| GET | `/api/owner/box/:boxId/business` | Owner business dashboard: auto-pulled members + new members + churn/retention + referral funnel, combined with the owner's cost/price inputs to compute overhead, revenue, break-even, margin, and CAC. |
+| PUT | `/api/owner/box/:boxId/business` | Save the box's cost + price + marketing-spend inputs; returns the recomputed dashboard. |
+| POST | `/api/commitments` | Member self-commit (`userId`, `type`, `target`, `goalCount`, `period`); writes a public `commit_made` feed event. |
+| POST | `/api/commitments/coach-request` | Coach-gated: ask a member to commit (`coachId`, `userId`, …); creates a `pending` commitment the member responds to. |
+| POST | `/api/commitments/:id/respond` | Member accepts (`active` + `commit_made`) or declines a coach request. |
+| GET | `/api/users/:userId/commitments` | A member's commitments with live progress, follow-through rate, and pending coach requests. |
+| GET | `/api/box/:boxId/commitments?userId=` | Coach-gated: the box's commitments split into active / kept / missed (at-risk) / pending. |
+| GET | `/api/box/:boxId/commitment-stats` | Box rally stat — "X members committed this week", kept this week. |
+
+## Owner business tools, recruiting & commitments
+
+Three reinforcing systems aimed at the owner-as-coach (not a financier),
+member-driven growth, and accountability:
+
+**Business dashboard** (`box_finances` table, **Owner → Business**) gives
+plain-language financial clarity. It auto-pulls what the data knows — current
+members, new members this month, churn/retention from activity, the referral
+funnel — and asks the owner only for what it can't (rent + the other fixed
+costs, average membership price, marketing spend). It then shows, in encouraging
+non-jargon: **break-even** ("you need 90 members to cover costs; you have 104 —
+14 above break-even"), monthly **revenue / overhead / margin**, **churn vs the
+industry benchmark** (~7.6% average, <5% target) with the framing that *keeping*
+a member costs 5–25× less than getting one, and **CAC** contrasted with the
+near-free referral channel. All visual cards, not a spreadsheet.
+
+**Member-driven recruiting** turns members into the growth engine (reusing the
+`referrals` system): any member can **invite a friend** by email/shareable link
+(native contact-list access is noted as an app-phase follow-up), invites→joins
+award referral points and fire celebratory feed events, and the owner sees a
+**recruiting leaderboard** (top recruiters) and the **referral funnel** (invites
+sent → pending → joined) right on the Business tab — making the cheapest, best
+growth channel legible.
+
+**Commitment mechanics** (`commitments` table) are the accountability engine, in
+both flavors. **Self-commit:** a member publicly commits ("I'll be at 5am
+tomorrow", "2× this week", "30-day streak") — visible to the box, which drives
+follow-through. **Coach-requested:** a coach asks a member to commit (e.g.
+2×/week); the member accepts or declines, creating a relationship-driven
+commitment the coach tracks. Kept/missed is **auto-detected** from logged
+activity (resolved on read and right after a workout is logged): a **kept**
+commitment fires a celebratory feed event, a **missed** one becomes an at-risk
+signal the coach sees and acts on. There's a member surface (make/see
+commitments + follow-through rate, accept coach asks), a coach surface (ask
+members, see who's keeping/missing), and a box rally stat. This ties the loop
+together — commitments feed retention, recruiting feeds growth, and the business
+dashboard makes the owner's numbers legible.
 
 ## Recurring competitions & performance-based matchmaking
 
@@ -305,6 +351,11 @@ What it generates (a 4-week window ending today, framed as June 2026):
   computed winners; **~75 training-partner pairs** (within-box + cross-box) and
   active + completed **head-to-head** matchups, with feed events celebrating new
   partnerships, competition wins, and head-to-head results.
+- **Box finances for every box** (the demo box tuned so the break-even story
+  lands ~14 above), a **referral funnel** (invites sent / pending / joined per
+  box), and **~25 commitments** for the demo box — active, kept and missed,
+  self-made and coach-requested (including a pending coach ask the demo login can
+  accept), with `commit_made` / `commit_kept` feed celebrations.
 
 **Performance & idempotency:** results load via batched multi-row INSERTs (not
 one at a time); the whole run takes ~1–2s. The script **rebuilds the world

@@ -264,6 +264,43 @@ const SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_h2h_a ON head_to_heads(a_user_id);
   CREATE INDEX IF NOT EXISTS idx_h2h_b ON head_to_heads(b_user_id);
+
+  -- Owner-entered box finances (one row per box). Member count, new-member count
+  -- and churn are computed live from activity; these are only the inputs the data
+  -- can't know (costs + price + marketing spend).
+  CREATE TABLE IF NOT EXISTS box_finances (
+    box_id           UUID PRIMARY KEY REFERENCES boxes(box_id) ON DELETE CASCADE,
+    rent             NUMERIC NOT NULL DEFAULT 0,
+    insurance        NUMERIC NOT NULL DEFAULT 0,
+    equipment        NUMERIC NOT NULL DEFAULT 0,
+    staff            NUMERIC NOT NULL DEFAULT 0,
+    affiliate_fee    NUMERIC NOT NULL DEFAULT 0,
+    software         NUMERIC NOT NULL DEFAULT 0,
+    membership_price NUMERIC NOT NULL DEFAULT 0,
+    marketing_spend  NUMERIC NOT NULL DEFAULT 0,
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+
+  -- Commitment mechanics: public self-commits + coach-requested accountability.
+  -- status: active (in flight) | kept | missed | pending (coach asked, awaiting
+  -- the member) | declined. created_by: self | coach.
+  CREATE TABLE IF NOT EXISTS commitments (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id     UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    box_id      UUID REFERENCES boxes(box_id) ON DELETE CASCADE,
+    type        TEXT NOT NULL,                  -- session | weekly_count | streak | custom
+    target      TEXT NOT NULL,                  -- human label ("5am tomorrow", "2x this week")
+    goal_count  INTEGER NOT NULL DEFAULT 1,     -- numeric target (sessions/days)
+    period      TEXT NOT NULL DEFAULT 'week',   -- day | week | month
+    status      TEXT NOT NULL DEFAULT 'active', -- active | kept | missed | pending | declined
+    created_by  TEXT NOT NULL DEFAULT 'self',   -- self | coach
+    coach_id    UUID REFERENCES users(user_id) ON DELETE SET NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    due_at      TIMESTAMPTZ NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_commitments_user  ON commitments(user_id);
+  CREATE INDEX IF NOT EXISTS idx_commitments_box   ON commitments(box_id, status);
+  CREATE INDEX IF NOT EXISTS idx_commitments_coach ON commitments(coach_id);
 `;
 
 // Idempotent fixups for databases created by earlier versions of this app:

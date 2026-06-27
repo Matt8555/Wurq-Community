@@ -396,7 +396,9 @@ app.post('/api/results', wrap(async (req, res) => {
     const newBadges = await evaluateBadges(client, { userId, result, workout });
 
     await client.query('COMMIT');
-    res.status(201).json({ result, newBadges, prs, comeback });
+    // Logging a workout can fulfill an active commitment (kept → feed celebration).
+    const commitmentsKept = await resolveCommitmentsForUser(userId);
+    res.status(201).json({ result, newBadges, prs, comeback, commitmentsKept });
   } catch (e) {
     await client.query('ROLLBACK');
     throw e;
@@ -594,6 +596,115 @@ app.get('/api/owner/box/:boxId/dashboard', wrap(async (req, res) => {
     churn: churn.rows.map((c) => ({ ...c, days_since: c.days_since == null ? null : Number(c.days_since) })),
     streaks: streaks.rows,
   });
+}));
+
+// ============================================================================
+// Owner business dashboard — plain-language financial clarity. Auto-pulls what
+// the data knows (members, new members, churn, referrals); the owner supplies
+// only costs + price + marketing spend.
+// ============================================================================
+const FINANCE_FIELDS = ['rent', 'insurance', 'equipment', 'staff', 'affiliate_fee', 'software', 'membership_price', 'marketing_spend'];
+// Sensible non-zero defaults so a never-configured box still shows a real model.
+const FINANCE_DEFAULTS = { rent: 7800, insurance: 350, equipment: 300, staff: 4200, affiliate_fee: 250, software: 150, membership_price: 150, marketing_spend: 600 };
+const CHURN_BENCHMARK = 7.6; // industry avg monthly churn %
+const CHURN_TARGET = 5;      // "great" threshold
+
+async function computeBusiness(boxId) {
+  const fin = (await pool.query('SELECT * FROM box_finances WHERE box_id = $1', [boxId])).rows[0];
+  const inputs = {};
+  FINANCE_FIELDS.forEach((f) => { inputs[f] = fin ? Number(fin[f]) : FINANCE_DEFAULTS[f]; });
+
+  // Live counts from the box.
+  const counts = (await pool.query(
+    `SELECT (SELECT COUNT(*)::int FROM box_memberships WHERE box_id = $1) AS members,
+            (SELECT COUNT(*)::int FROM box_memberships WHERE box_id = $1 AND joined_at >= now() - interval '30 days') AS joined_30d`,
+    [boxId])).rows[0];
+
+  // New members this month = recent signups (last 14d) + members who joined via a
+  // referral that landed in the last 30 days (the referral-driven cohort).
+  const newm = (await pool.query(
+    `SELECT COUNT(*)::int AS total FROM (
+        SELECT m.user_id FROM box_memberships m
+         WHERE m.box_id = $1 AND m.joined_at >= now() - interval '14 days'
+        UNION
+        SELECT r.referred_user_id FROM referrals r
+         WHERE r.box_id = $1 AND r.status = 'joined' AND r.referred_user_id IS NOT NULL
+           AND r.created_at >= now() - interval '30 days'
+      ) s`, [boxId])).rows[0];
+  const referredNew = (await pool.query(
+    `SELECT COUNT(*)::int AS n FROM referrals
+      WHERE box_id = $1 AND status = 'joined' AND created_at >= now() - interval '30 days'`, [boxId])).rows[0].n;
+
+  // Churn from activity: of members who were established (first logged 14+ days
+  // ago), how many have gone quiet (no result in the last 14 days)?
+  const ch = (await pool.query(
+    `WITH act AS (
+       SELECT m.user_id, MIN(r.created_at) AS first_r, MAX(r.created_at) AS last_r
+         FROM box_memberships m JOIN results r ON r.user_id = m.user_id
+        WHERE m.box_id = $1 GROUP BY m.user_id)
+     SELECT COUNT(*) FILTER (WHERE first_r <= now() - interval '14 days')::int AS established,
+            COUNT(*) FILTER (WHERE first_r <= now() - interval '14 days' AND last_r < now() - interval '14 days')::int AS lapsed
+       FROM act`, [boxId])).rows[0];
+  const established = ch.established || 0;
+  const lapsed = ch.lapsed || 0;
+  const churnPct = established ? Math.round((lapsed / established) * 1000) / 10 : 0;
+  const retentionPct = established ? Math.round((1 - lapsed / established) * 1000) / 10 : 100;
+
+  // Referral funnel for the box.
+  const funnel = (await pool.query(
+    `SELECT COUNT(*)::int AS invites,
+            COUNT(*) FILTER (WHERE status = 'pending')::int AS pending,
+            COUNT(*) FILTER (WHERE status = 'joined')::int AS joined
+       FROM referrals WHERE box_id = $1`, [boxId])).rows[0];
+
+  const overhead = inputs.rent + inputs.insurance + inputs.equipment + inputs.staff + inputs.affiliate_fee + inputs.software;
+  const members = counts.members;
+  const revenue = members * inputs.membership_price;
+  const breakEven = inputs.membership_price > 0 ? Math.ceil(overhead / inputs.membership_price) : null;
+  const profit = revenue - overhead;
+  const marginPct = revenue > 0 ? Math.round((profit / revenue) * 1000) / 10 : 0;
+  const newMembers = newm.total;
+  const cac = newMembers > 0 ? Math.round(inputs.marketing_spend / newMembers) : null;
+
+  return {
+    configured: !!fin,
+    inputs,
+    members,
+    overhead, revenue, profit,
+    break_even: breakEven,
+    above_break_even: breakEven == null ? null : members - breakEven,
+    margin_pct: marginPct,
+    churn: { pct: churnPct, retention_pct: retentionPct, established, lapsed, benchmark: CHURN_BENCHMARK, target: CHURN_TARGET },
+    acquisition: { marketing_spend: inputs.marketing_spend, new_members: newMembers, referred_new: referredNew, cac },
+    funnel,
+  };
+}
+
+app.get('/api/owner/box/:boxId/business', wrap(async (req, res) => {
+  const { boxId } = req.params;
+  if (!isUuid(boxId)) return res.status(400).json({ error: 'Invalid box id.' });
+  const box = await pool.query('SELECT box_id, name FROM boxes WHERE box_id = $1', [boxId]);
+  if (!box.rows[0]) return res.status(404).json({ error: 'Box not found.' });
+  res.json({ box: box.rows[0], ...(await computeBusiness(boxId)) });
+}));
+
+app.put('/api/owner/box/:boxId/business', wrap(async (req, res) => {
+  const { boxId } = req.params;
+  if (!isUuid(boxId)) return res.status(400).json({ error: 'Invalid box id.' });
+  const box = await pool.query('SELECT 1 FROM boxes WHERE box_id = $1', [boxId]);
+  if (!box.rows[0]) return res.status(404).json({ error: 'Box not found.' });
+  const b = req.body || {};
+  const vals = FINANCE_FIELDS.map((f) => {
+    const n = Number(b[f]);
+    return Number.isFinite(n) && n >= 0 ? n : FINANCE_DEFAULTS[f];
+  });
+  await pool.query(
+    `INSERT INTO box_finances (box_id, rent, insurance, equipment, staff, affiliate_fee, software, membership_price, marketing_spend, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, now())
+       ON CONFLICT (box_id) DO UPDATE SET rent=$2, insurance=$3, equipment=$4, staff=$5, affiliate_fee=$6,
+         software=$7, membership_price=$8, marketing_spend=$9, updated_at=now()`,
+    [boxId, ...vals]);
+  res.json({ ok: true, ...(await computeBusiness(boxId)) });
 }));
 
 // ---- API: challenges --------------------------------------------------------
@@ -1136,6 +1247,198 @@ app.post('/api/head-to-heads', wrap(async (req, res) => {
     `INSERT INTO feed_events (user_id, type, ref_id, payload) VALUES ($1, 'h2h_start', $2, $3)`,
     [aId, ins.rows[0].id, JSON.stringify({ opponent_name: bn ? bn.display_name : 'an athlete', metric, unit: h2hMetricLabel(metric) })]);
   res.status(201).json({ ok: true, id: ins.rows[0].id });
+}));
+
+// ============================================================================
+// Commitment mechanics — public self-commits + coach-requested accountability.
+// Kept/missed is AUTO-DETECTED from logged activity (and resolved lazily on read
+// and right after a result is logged). Kept fires a celebratory feed event;
+// missed becomes an at-risk signal the coach sees.
+// ============================================================================
+const COMMIT_TYPES = ['session', 'weekly_count', 'streak', 'custom'];
+
+// Count a member's training in a commitment's window.
+async function commitProgress(c) {
+  const { rows } = await pool.query(
+    `SELECT COUNT(DISTINCT created_at::date)::int AS days, COUNT(*)::int AS sessions
+       FROM results WHERE user_id = $1 AND created_at BETWEEN $2 AND $3`,
+    [c.user_id, c.created_at, c.due_at]);
+  const r = rows[0] || { days: 0, sessions: 0 };
+  const goal = c.goal_count || 1;
+  const progress = (c.type === 'weekly_count' || c.type === 'streak') ? r.days : r.sessions;
+  return { progress, goal, met: progress >= goal };
+}
+
+// Resolve active commitments to kept/missed. Scope by user or box. Kept fires a
+// 'commit_kept' feed celebration. Returns number resolved.
+async function resolveCommitments({ userId = null, boxId = null }) {
+  const where = userId ? 'user_id = $1' : 'box_id = $1';
+  const arg = userId || boxId;
+  if (!isUuid(arg)) return 0;
+  const { rows } = await pool.query(
+    `SELECT * FROM commitments WHERE status = 'active' AND ${where}`, [arg]);
+  let n = 0;
+  for (const c of rows) {
+    const { met } = await commitProgress(c);
+    if (met) {
+      await pool.query(`UPDATE commitments SET status = 'kept' WHERE id = $1 AND status = 'active'`, [c.id]);
+      await pool.query(
+        `INSERT INTO feed_events (user_id, type, ref_id, payload) VALUES ($1, 'commit_kept', $2, $3)`,
+        [c.user_id, c.id, JSON.stringify({ target: c.target, by_coach: c.created_by === 'coach' })]);
+      n++;
+    } else if (new Date(c.due_at).getTime() < Date.now()) {
+      await pool.query(`UPDATE commitments SET status = 'missed' WHERE id = $1 AND status = 'active'`, [c.id]);
+      n++;
+    }
+  }
+  return n;
+}
+async function resolveCommitmentsForUser(userId) { try { return await resolveCommitments({ userId }); } catch (_) { return 0; } }
+
+function commitPublic(c, extra = {}) {
+  return {
+    id: c.id, user_id: c.user_id, type: c.type, target: c.target, goal_count: c.goal_count,
+    period: c.period, status: c.status, created_by: c.created_by, coach_id: c.coach_id,
+    created_at: c.created_at, due_at: c.due_at, ...extra,
+  };
+}
+
+// Create a self-commitment (public to the box).
+app.post('/api/commitments', wrap(async (req, res) => {
+  const b = req.body || {};
+  const userId = b.userId || b.user_id;
+  if (!isUuid(userId)) return res.status(400).json({ error: 'A valid userId is required.' });
+  const type = COMMIT_TYPES.includes(b.type) ? b.type : 'session';
+  const target = (typeof b.target === 'string' ? b.target.trim() : '').slice(0, 120);
+  if (!target) return res.status(400).json({ error: 'Tell the box what you\'re committing to.' });
+  const goal = Math.max(1, Math.min(60, parseInt(b.goalCount || b.goal_count || 1, 10) || 1));
+  const period = ['day', 'week', 'month'].includes(b.period) ? b.period : 'week';
+  const boxId = await boxIdForUser(userId);
+  const due = b.dueAt ? new Date(b.dueAt) : new Date(Date.now() + (period === 'day' ? 1 : period === 'month' ? 30 : 7) * 86400000);
+  if (isNaN(due)) return res.status(400).json({ error: 'Invalid due date.' });
+  const { rows } = await pool.query(
+    `INSERT INTO commitments (user_id, box_id, type, target, goal_count, period, status, created_by, due_at)
+       VALUES ($1,$2,$3,$4,$5,$6,'active','self',$7) RETURNING *`,
+    [userId, boxId, type, target, goal, period, due.toISOString()]);
+  // Public commitment → feed event for the box.
+  await pool.query(
+    `INSERT INTO feed_events (user_id, type, ref_id, payload) VALUES ($1, 'commit_made', $2, $3)`,
+    [userId, rows[0].id, JSON.stringify({ target })]);
+  res.status(201).json({ ok: true, commitment: commitPublic(rows[0]) });
+}));
+
+// Coach asks a member to commit (creates a pending request the member responds to).
+app.post('/api/commitments/coach-request', wrap(async (req, res) => {
+  const b = req.body || {};
+  const coachId = b.coachId || b.coach_id;
+  const userId = b.userId || b.user_id;
+  if (!isUuid(coachId) || !isUuid(userId)) return res.status(400).json({ error: 'Valid coachId and userId are required.' });
+  if (coachId === userId) return res.status(400).json({ error: 'Pick a member to ask.' });
+  const boxId = await boxIdForUser(userId);
+  if (!boxId || !hasCoach(await rolesFor(coachId, boxId))) return res.status(403).json({ error: 'Only a coach of this member\'s box can request a commitment.' });
+  const type = COMMIT_TYPES.includes(b.type) ? b.type : 'weekly_count';
+  const target = (typeof b.target === 'string' ? b.target.trim() : '').slice(0, 120) || '2x per week';
+  const goal = Math.max(1, Math.min(60, parseInt(b.goalCount || b.goal_count || 2, 10) || 2));
+  const period = ['day', 'week', 'month'].includes(b.period) ? b.period : 'week';
+  const due = b.dueAt ? new Date(b.dueAt) : new Date(Date.now() + (period === 'day' ? 1 : period === 'month' ? 30 : 7) * 86400000);
+  const { rows } = await pool.query(
+    `INSERT INTO commitments (user_id, box_id, type, target, goal_count, period, status, created_by, coach_id, due_at)
+       VALUES ($1,$2,$3,$4,$5,$6,'pending','coach',$7,$8) RETURNING *`,
+    [userId, boxId, type, target, goal, period, coachId, due.toISOString()]);
+  res.status(201).json({ ok: true, commitment: commitPublic(rows[0]) });
+}));
+
+// Member accepts or declines a coach-requested commitment.
+app.post('/api/commitments/:id/respond', wrap(async (req, res) => {
+  const { id } = req.params;
+  const b = req.body || {};
+  const userId = b.userId || b.user_id;
+  if (!isUuid(id) || !isUuid(userId)) return res.status(400).json({ error: 'Invalid id.' });
+  const c = (await pool.query('SELECT * FROM commitments WHERE id = $1', [id])).rows[0];
+  if (!c) return res.status(404).json({ error: 'Commitment not found.' });
+  if (c.user_id !== userId) return res.status(403).json({ error: 'This isn\'t your commitment.' });
+  if (c.status !== 'pending') return res.status(400).json({ error: 'Already responded.' });
+  if (b.action === 'decline') {
+    await pool.query(`UPDATE commitments SET status = 'declined' WHERE id = $1`, [id]);
+    return res.json({ ok: true, status: 'declined' });
+  }
+  await pool.query(`UPDATE commitments SET status = 'active' WHERE id = $1`, [id]);
+  await pool.query(
+    `INSERT INTO feed_events (user_id, type, ref_id, payload) VALUES ($1, 'commit_made', $2, $3)`,
+    [userId, id, JSON.stringify({ target: c.target, by_coach: true })]);
+  res.json({ ok: true, status: 'active' });
+}));
+
+// A member's commitments + follow-through rate + pending coach requests.
+app.get('/api/users/:userId/commitments', wrap(async (req, res) => {
+  const { userId } = req.params;
+  if (!isUuid(userId)) return res.status(400).json({ error: 'Invalid user id.' });
+  await resolveCommitments({ userId });
+  const { rows } = await pool.query(
+    `SELECT c.*, COALESCE(NULLIF(cp.display_name,''),'Coach') AS coach_name
+       FROM commitments c LEFT JOIN profiles cp ON cp.user_id = c.coach_id
+      WHERE c.user_id = $1
+      ORDER BY CASE c.status WHEN 'pending' THEN 0 WHEN 'active' THEN 1 ELSE 2 END, c.due_at DESC`, [userId]);
+  const out = [];
+  for (const c of rows) {
+    const extra = { coach_name: c.created_by === 'coach' ? c.coach_name : null };
+    if (c.status === 'active') Object.assign(extra, await commitProgress(c));
+    out.push(commitPublic(c, extra));
+  }
+  const kept = rows.filter((c) => c.status === 'kept').length;
+  const missed = rows.filter((c) => c.status === 'missed').length;
+  res.json({
+    commitments: out,
+    pending: out.filter((c) => c.status === 'pending'),
+    follow_through_rate: (kept + missed) ? Math.round((kept / (kept + missed)) * 100) : null,
+    kept_count: kept, missed_count: missed,
+    active_count: rows.filter((c) => c.status === 'active').length,
+  });
+}));
+
+// Coach view of a box's commitments: who's keeping, who's missing (at-risk).
+app.get('/api/box/:boxId/commitments', wrap(async (req, res) => {
+  const { boxId } = req.params;
+  if (!isUuid(boxId)) return res.status(400).json({ error: 'Invalid box id.' });
+  const actingUserId = isUuid(req.query.userId) ? req.query.userId : null;
+  if (!hasCoach(await rolesFor(actingUserId, boxId))) return res.status(403).json({ error: 'Coaches only.' });
+  await resolveCommitments({ boxId });
+  const { rows } = await pool.query(
+    `SELECT c.*, COALESCE(NULLIF(p.display_name,''),'Athlete') AS display_name,
+            COALESCE(NULLIF(cp.display_name,''),'Coach') AS coach_name
+       FROM commitments c
+       LEFT JOIN profiles p ON p.user_id = c.user_id
+       LEFT JOIN profiles cp ON cp.user_id = c.coach_id
+      WHERE c.box_id = $1 AND c.status IN ('active','kept','missed','pending')
+      ORDER BY c.created_at DESC LIMIT 200`, [boxId]);
+  const decorate = async (c) => {
+    const e = { display_name: c.display_name, coach_name: c.created_by === 'coach' ? c.coach_name : null };
+    if (c.status === 'active') Object.assign(e, await commitProgress(c));
+    return commitPublic(c, e);
+  };
+  const active = [], kept = [], missed = [], pending = [];
+  for (const c of rows) {
+    const d = await decorate(c);
+    if (c.status === 'active') active.push(d);
+    else if (c.status === 'kept') kept.push(d);
+    else if (c.status === 'missed') missed.push(d);
+    else if (c.status === 'pending') pending.push(d);
+  }
+  res.json({ active, kept: kept.slice(0, 20), missed, pending,
+    summary: { active: active.length, kept: kept.length, missed: missed.length, at_risk: missed.length } });
+}));
+
+// Box rally stat — "X members committed this week" (public).
+app.get('/api/box/:boxId/commitment-stats', wrap(async (req, res) => {
+  const { boxId } = req.params;
+  if (!isUuid(boxId)) return res.status(400).json({ error: 'Invalid box id.' });
+  await resolveCommitments({ boxId });
+  const r = (await pool.query(
+    `SELECT COUNT(DISTINCT user_id) FILTER (WHERE status = 'active')::int AS committed,
+            COUNT(*) FILTER (WHERE status = 'kept' AND created_at >= now() - interval '7 days')::int AS kept_week,
+            COUNT(*) FILTER (WHERE status = 'active')::int AS active_total
+       FROM commitments WHERE box_id = $1`, [boxId])).rows[0];
+  res.json({ committed: r.committed, kept_this_week: r.kept_week, active_total: r.active_total });
 }));
 
 // ---- API: athlete training history + detail ---------------------------------
@@ -1842,6 +2145,8 @@ app.get('/api/health', wrap(async (req, res) => {
              (SELECT COUNT(*) FROM competitions)::int AS competitions,
              (SELECT COUNT(*) FROM training_partners)::int AS training_partners,
              (SELECT COUNT(*) FROM head_to_heads)::int AS head_to_heads,
+             (SELECT COUNT(*) FROM commitments)::int AS commitments,
+             (SELECT COUNT(*) FROM box_finances)::int AS box_finances,
              EXISTS (SELECT 1 FROM boxes WHERE name = $1) AS world_seeded`, [SEED_SENTINEL_BOX]);
     counts = r.rows[0];
   } catch (e) { counts = { error: e.message }; }
