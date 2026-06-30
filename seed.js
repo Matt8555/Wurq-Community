@@ -953,6 +953,26 @@ async function main() {
     await insertCommit(alex, { type: 'weekly_count', target: 'Hit 3x last week', goal: 3, status: 'kept', createdK: 9, dueAt: ts(2), feedKept: true });
     await bulkInsert(client, 'feed_events', ['user_id', 'type', 'payload', 'kudos', 'created_at'], commitFeed);
 
+    // ---- WurQ app integration — a few athletes connected, with synced workouts.
+    // Marks the demo logins + several Borderland members as WurQ-connected and
+    // flags their recent results as auto-captured (source='wurq') so the synced
+    // experience looks real out of the box.
+    const wurqConnected = [matt, alex, ...athletes.filter((a) => a.boxName === HOME_BOX && a !== matt && a !== alex).slice(0, 6)].filter(Boolean);
+    for (const a of wurqConnected) {
+      await client.query(
+        `UPDATE profiles SET wurq_connected = true, wurq_user_id = $2 WHERE user_id = $1`,
+        [a.userId, 'wq_' + slug(a.email).slice(0, 12)]);
+      // Their recent results (last 5 days) read as auto-captured WurQ syncs.
+      await client.query(
+        `UPDATE results SET source = 'wurq' WHERE user_id = $1 AND created_at >= now() - interval '5 days'`,
+        [a.userId]);
+      // Tag the matching feed events so the box feed shows the ⌚ WurQ badge.
+      await client.query(
+        `UPDATE feed_events SET payload = jsonb_set(payload, '{source}', '"wurq"')
+          WHERE user_id = $1 AND type = 'result_logged' AND created_at >= now() - interval '5 days'`,
+        [a.userId]);
+    }
+
     await client.query('COMMIT');
   } catch (e) {
     await client.query('ROLLBACK');
@@ -972,13 +992,15 @@ async function main() {
            (SELECT COUNT(*) FROM head_to_heads)::int AS h2h,
            (SELECT COUNT(*) FROM commitments)::int AS commitments,
            (SELECT COUNT(*) FROM box_finances)::int AS finances,
+           (SELECT COUNT(*) FROM profiles WHERE wurq_connected)::int AS wurq,
+           (SELECT COUNT(*) FROM results WHERE source='wurq')::int AS synced,
            (SELECT COUNT(*) FROM feed_events)::int AS feed,
            (SELECT COUNT(*) FROM user_badges)::int AS badges`);
   const c = t.rows[0];
   console.log(`[seed] world rebuilt — ${c.boxes} boxes, ${c.athletes} athletes, ${c.results} results, ` +
     `${c.workouts} workouts, ${c.challenges} challenges, ${c.competitions} competitions, ` +
     `${c.partners} training partners, ${c.h2h} head-to-heads, ${c.commitments} commitments, ` +
-    `${c.finances} box finances, ${c.feed} feed events, ${c.badges} badge awards.`);
+    `${c.finances} box finances, ${c.wurq} WurQ-connected, ${c.synced} synced results, ${c.feed} feed events, ${c.badges} badge awards.`);
   console.log(`[seed] Demo box: "${HOME_BOX}". Demo logins: ${DEMO_ATHLETES.map((p) => `${p.email} (${p.name})`).join(', ')}.`);
 }
 

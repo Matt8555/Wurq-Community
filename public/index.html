@@ -785,6 +785,51 @@
     .coach-ask-tag { display: inline-block; background: var(--surface-2); color: #7cd4ff; border: 1px solid #7cd4ff55;
       font-size: 0.6rem; font-weight: 800; text-transform: uppercase; padding: 1px 6px; border-radius: 5px; vertical-align: middle; }
 
+    /* ---- WurQ app integration ---- */
+    .wurq-logo { font-weight: 900; font-size: 1.1rem; letter-spacing: -0.5px; }
+    .wurq-logo span { color: var(--acid); }
+    .wurq-logo.big { font-size: 1.8rem; }
+    .wurq-card { border-radius: 16px; padding: 16px; margin-bottom: 12px; border: 1px solid var(--border); background: var(--surface); }
+    .wurq-card.on { border-color: var(--acid); background: linear-gradient(135deg, var(--acid-dim), var(--surface)); }
+    .wurq-top { display: flex; align-items: center; gap: 10px; }
+    .wurq-state { font-size: 0.82rem; font-weight: 700; color: var(--chalk); }
+    .wurq-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--acid);
+      box-shadow: 0 0 0 0 rgba(198,255,0,0.6); animation: wurqPulse 1.8s infinite; vertical-align: middle; margin-right: 2px; }
+    @keyframes wurqPulse { 0% { box-shadow: 0 0 0 0 rgba(198,255,0,0.5);} 70% { box-shadow: 0 0 0 6px rgba(198,255,0,0);} 100% { box-shadow: 0 0 0 0 rgba(198,255,0,0);} }
+    .wurq-sub { color: var(--muted); font-size: 0.8rem; line-height: 1.5; margin: 10px 0; }
+    .wurq-sim { width: 100%; }
+    .demo-note { font-size: 0.68rem; color: var(--muted); text-align: center; margin-top: 8px; font-style: italic; }
+    .manual-toggle { display: block; margin: 4px auto 8px; }
+    .manual-card .manual-lab { font-size: 0.74rem; font-weight: 800; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 10px; }
+
+    .wurq-tag { display: inline-block; background: #10130a; color: var(--acid); border: 1px solid var(--acid);
+      font-size: 0.6rem; font-weight: 800; padding: 1px 6px; border-radius: 5px; vertical-align: middle; }
+
+    .synced-banner { background: var(--acid-dim); border: 1px solid var(--acid); color: var(--acid);
+      border-radius: 10px; padding: 9px 12px; font-size: 0.8rem; font-weight: 700; margin-bottom: 12px; }
+    .synced-banner span { color: var(--muted); font-weight: 600; }
+    .sensor-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 14px; }
+    .sensor { background: var(--surface); border: 1px solid var(--acid); border-radius: 12px; padding: 11px 6px; text-align: center;
+      position: relative; }
+    .sensor::after { content: '⌚'; position: absolute; top: 5px; right: 6px; font-size: 0.6rem; opacity: 0.5; }
+    .sensor .sv { font-size: 1.15rem; font-weight: 900; }
+    .sensor .sl { font-size: 0.62rem; color: var(--muted); margin-top: 2px; }
+
+    .wurq-prof { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%;
+      border-radius: 12px; padding: 11px 13px; margin-bottom: 14px; font-size: 0.82rem; font-weight: 700; cursor: pointer; }
+    .wurq-prof.on { background: var(--acid-dim); border: 1px solid var(--acid); color: var(--chalk); cursor: default; }
+    .wurq-prof.off { background: var(--surface); border: 1px dashed var(--acid); color: var(--acid); }
+
+    .wurq-overlay { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,0.72); backdrop-filter: blur(4px);
+      display: flex; align-items: center; justify-content: center; padding: 22px; }
+    .wurq-modal { background: var(--surface); border: 1px solid var(--acid); border-radius: 18px; padding: 22px;
+      max-width: 360px; width: 100%; text-align: center; }
+    .wurq-modal .wm-title { font-size: 1.15rem; font-weight: 800; margin: 10px 0 6px; }
+    .wurq-modal .wm-sub { color: var(--muted); font-size: 0.84rem; line-height: 1.5; margin-bottom: 14px; }
+    .wurq-modal .wm-scopes { text-align: left; background: var(--surface-2); border-radius: 12px; padding: 12px 14px;
+      margin-bottom: 16px; display: flex; flex-direction: column; gap: 6px; font-size: 0.82rem; color: var(--chalk); }
+    .wurq-modal .btn-primary { width: 100%; margin-bottom: 8px; }
+
     .hidden { display: none !important; }
   </style>
 </head>

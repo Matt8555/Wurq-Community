@@ -14,7 +14,9 @@ Postgres.
 Tables: `users`, `profiles`, `identities`, `boxes`, `box_memberships`,
 `box_roles`, `workouts`, `results`, `badges`, `user_badges`, `feed_events`,
 `squads`, `squad_members`, `follows`, `referrals`, `challenges`, `competitions`,
-`training_partners`, `head_to_heads`, `box_finances`, `commitments`. The `identities`
+`training_partners`, `head_to_heads`, `box_finances`, `commitments`
+(plus `profiles.wurq_connected` and `results.source` for the WurQ integration).
+The `identities`
 table lets you link other identity sources later (Shopify, Circle, watch, …)
 **without restructuring** — each source just adds a row keyed by `user_id`.
 
@@ -81,7 +83,9 @@ one file so they are easy to tune.
 | PUT | `/api/profile/:userId` | Create/update profile fields. |
 | POST | `/api/profile/:userId/avatar` | Upload an avatar image (`avatar` field); stored as a base64 data URI in Postgres and returned. |
 | GET | `/api/wod/today` | Today's WOD (seeds "Fran" if none exists for today). |
-| POST | `/api/results` | Submit raw inputs (`userId`, `workoutId`, `time_seconds`, `rom_pct`, `unbroken_sets`); server computes the Holistic Score, upserts, writes a `result_logged` feed event, evaluates badges. Returns the saved result + any newly earned badges. |
+| POST | `/api/results` | Manual log: submit raw inputs (`userId`, `workoutId`, `time_seconds`, `rom_pct`, `unbroken_sets`); server computes the Holistic Score + metrics, then runs the shared `recordResult` path (upsert, `result_logged` feed event, PR + comeback, badges, commitment check). |
+| POST | `/api/integrations/wurq/workout` | **WurQ app sync (mock).** Token-gated (`x-wurq-token`). Accepts a WurQ-shaped payload, matches the athlete by email, resolves the workout, and runs the SAME `recordResult` effects as a manual log — with WurQ's auto-captured sensor metrics. All WurQ field mapping is isolated in `wurqAdapter.js`. |
+| POST | `/api/integrations/wurq/connect` | Mock OAuth handshake — sets/clears `profiles.wurq_connected` (`userId`, `action`). |
 | GET | `/api/leaderboard/box/:boxId/:workoutId` | In-box leaderboard, joined to `display_name` + `avatar_url`, ranked by Holistic Score. |
 | GET | `/api/leaderboard/boxes/:workoutId` | Box-vs-box: each box scored by **avg Holistic Score × participation rate**, with the component numbers. |
 | GET | `/api/feed/box/:boxId` | Recent feed events for a box's members, newest first. |
@@ -130,6 +134,38 @@ one file so they are easy to tune.
 | GET | `/api/users/:userId/commitments` | A member's commitments with live progress, follow-through rate, and pending coach requests. |
 | GET | `/api/box/:boxId/commitments?userId=` | Coach-gated: the box's commitments split into active / kept / missed (at-risk) / pending. |
 | GET | `/api/box/:boxId/commitment-stats` | Box rally stat — "X members committed this week", kept this week. |
+
+## WurQ app integration (mock, swap-ready)
+
+Demonstrates how workout data flows from the **WurQ iOS app** into this community
+platform. WurQ's real API isn't available yet, so this is a realistic **mock** —
+but structured so swapping in the real API is a small change, not a rewrite.
+
+- **Ingestion API** — `POST /api/integrations/wurq/workout` accepts a payload in
+  the shape the WurQ app would plausibly send (external id/email, workout
+  name/type, and the rich auto-captured metrics WurQ produces: time, holistic
+  score, ROM, power, work volume, HR avg/peak, calories, per-movement breakdown,
+  timestamp). It matches the athlete to a platform user by email, resolves the
+  workout, and fires the **exact same downstream effects as a manual log** —
+  because both paths call one shared `recordResult` function (leaderboard,
+  feed event, PR/badge check, team-goal progress, commitment check).
+- **One place to change** — all WurQ-specific field mapping lives in
+  **`wurqAdapter.js`**, with a `TODO(wurq-integration)` marking the single spot
+  that changes when the real schema arrives. The endpoint is **token-gated**
+  (`x-wurq-token`) so it's structured like a real authenticated integration.
+- **"Synced from WurQ" experience** — the athlete WOD screen leads with a
+  **Connected to WurQ** state; manual logging stays available but secondary. A
+  clearly-labeled **"Simulate WurQ sync"** demo control POSTs a realistic
+  workout to the ingestion endpoint so you can watch a workout flow in from "the
+  app" and land on the leaderboard live (a code comment notes this is the WurQ
+  app's job in production). Synced results show their **auto-captured sensor
+  metrics** (ROM, power, HR, work volume) distinctly, and carry a `source='wurq'`
+  flag — surfaced as a **⌚ WurQ** badge in the feed, profile, and session detail.
+- **Connect step** — onboarding and the profile include a **Connect your WurQ
+  app** step (mock OAuth-style handshake that persists `wurq_connected`); a code
+  comment notes this becomes real WurQ SSO/OAuth once we have access.
+- **Seeded** — several athletes (incl. the demo logins) are seeded as
+  WurQ-connected with synced-looking recent workouts.
 
 ## Owner business tools, recruiting & commitments
 
@@ -356,6 +392,8 @@ What it generates (a 4-week window ending today, framed as June 2026):
   box), and **~25 commitments** for the demo box — active, kept and missed,
   self-made and coach-requested (including a pending coach ask the demo login can
   accept), with `commit_made` / `commit_kept` feed celebrations.
+- **~8 WurQ-connected athletes** (incl. the demo logins) with recent results
+  flagged as **synced from WurQ** (`source='wurq'`) and ⌚-tagged in the feed.
 
 **Performance & idempotency:** results load via batched multi-row INSERTs (not
 one at a time); the whole run takes ~1–2s. The script **rebuilds the world

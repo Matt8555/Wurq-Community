@@ -53,6 +53,8 @@ async function getProfileRow(userId) {
             COALESCE(p.units, 'lb')             AS units,
             COALESCE(p.profile_complete, false) AS profile_complete,
             COALESCE(p.referral_points, 0) AS referral_points,
+            COALESCE(p.wurq_connected, false) AS wurq_connected,
+            p.wurq_user_id,
             p.updated_at,
             b.box_id, b.name AS box_name,
             EXISTS (SELECT 1 FROM box_roles br WHERE br.user_id = u.user_id AND br.box_id = b.box_id AND br.role IN ('coach','owner')) AS is_coach,
@@ -278,40 +280,15 @@ app.get('/api/wod/today', wrap(async (req, res) => {
   res.json(rows[0]);
 }));
 
-// ---- API: submit a result ---------------------------------------------------
-// Computes the Holistic Score server-side, saves the result, writes a feed
-// event, and evaluates badges — all in one transaction.
-app.post('/api/results', wrap(async (req, res) => {
-  const body = req.body || {};
-  const userId = body.userId || body.user_id;
-  const workoutId = body.workoutId || body.workout_id;
-
-  if (!isUuid(userId)) return res.status(400).json({ error: 'A valid userId is required.' });
-  if (!isUuid(workoutId)) return res.status(400).json({ error: 'A valid workoutId is required.' });
-
-  const time_seconds = Number(body.time_seconds);
-  const rom_pct = Number(body.rom_pct);
-  const unbroken_sets = Number(body.unbroken_sets);
-
-  if (!Number.isFinite(time_seconds) || time_seconds <= 0 || time_seconds > 86400) {
-    return res.status(400).json({ error: 'time_seconds must be a number between 1 and 86400.' });
-  }
-  if (!Number.isFinite(rom_pct) || rom_pct < 0 || rom_pct > 100) {
-    return res.status(400).json({ error: 'rom_pct must be between 0 and 100.' });
-  }
-  if (!Number.isInteger(unbroken_sets) || unbroken_sets < 0 || unbroken_sets > 1000) {
-    return res.status(400).json({ error: 'unbroken_sets must be a whole number between 0 and 1000.' });
-  }
-
-  const userExists = await pool.query('SELECT 1 FROM users WHERE user_id = $1', [userId]);
-  if (!userExists.rows[0]) return res.status(404).json({ error: 'User not found.' });
-  const workoutRow = await pool.query(
-    'SELECT workout_id, name FROM workouts WHERE workout_id = $1', [workoutId]);
-  if (!workoutRow.rows[0]) return res.status(404).json({ error: 'Workout not found.' });
-  const workout = workoutRow.rows[0];
-
-  const holistic_score = computeHolisticScore({ time_seconds, rom_pct, unbroken_sets });
-  const metrics = deriveMetrics({ workoutName: workout.name, time_seconds, rom_pct, unbroken_sets });
+// ---- Shared result recording -------------------------------------------------
+// The single code path that saves a result and fires ALL downstream effects
+// (leaderboard via the row itself, feed event, PR + comeback detection, badges,
+// commitment check). Used by BOTH the manual log (POST /api/results) and the
+// WurQ app sync (POST /api/integrations/wurq/workout). Callers pass the FINAL
+// holistic score + metrics, so manual derives them and WurQ supplies its
+// auto-captured sensor metrics — the effects are identical either way.
+async function recordResult({ userId, workout, time_seconds, rom_pct, unbroken_sets, holistic_score, metrics, source = 'manual', performedAt = null }) {
+  const workoutId = workout.workout_id;
 
   // PR detection — compare against the athlete's PRIOR history (other workouts).
   const prevBest = await pool.query(
@@ -346,11 +323,10 @@ app.post('/api/results', wrap(async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-
     const saved = await client.query(
       `INSERT INTO results (user_id, workout_id, time_seconds, rom_pct, unbroken_sets, holistic_score,
-                            avg_hr, peak_hr, calories, power_output, work_volume, movements)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                            avg_hr, peak_hr, calories, power_output, work_volume, movements, source)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
          ON CONFLICT (user_id, workout_id) DO UPDATE SET
            time_seconds   = EXCLUDED.time_seconds,
            rom_pct        = EXCLUDED.rom_pct,
@@ -358,11 +334,11 @@ app.post('/api/results', wrap(async (req, res) => {
            holistic_score = EXCLUDED.holistic_score,
            avg_hr = EXCLUDED.avg_hr, peak_hr = EXCLUDED.peak_hr, calories = EXCLUDED.calories,
            power_output = EXCLUDED.power_output, work_volume = EXCLUDED.work_volume,
-           movements = EXCLUDED.movements, created_at = now()
-         RETURNING result_id, user_id, workout_id, time_seconds, rom_pct, unbroken_sets, holistic_score, created_at`,
+           movements = EXCLUDED.movements, source = EXCLUDED.source, created_at = now()
+         RETURNING result_id, user_id, workout_id, time_seconds, rom_pct, unbroken_sets, holistic_score, source, created_at`,
       [userId, workoutId, time_seconds, rom_pct, unbroken_sets, holistic_score,
        metrics.avg_hr, metrics.peak_hr, metrics.calories, metrics.power_output, metrics.work_volume,
-       JSON.stringify(metrics.movements)]
+       JSON.stringify(metrics.movements || []), source]
     );
     const result = saved.rows[0];
 
@@ -375,10 +351,10 @@ app.post('/api/results', wrap(async (req, res) => {
          workout_name: workout.name,
          holistic_score: result.holistic_score,
          time_seconds: result.time_seconds,
+         source, // 'wurq' renders as "synced from WurQ" in the feed
        })]
     );
 
-    // A PR is its own celebratory feed event.
     for (const pr of prs) {
       await client.query(
         `INSERT INTO feed_events (user_id, type, ref_id, payload)
@@ -386,7 +362,6 @@ app.post('/api/results', wrap(async (req, res) => {
         [userId, result.result_id,
          JSON.stringify({ workout_name: workout.name, label: pr.label, message: pr.message })]);
     }
-
     if (comeback) {
       await client.query(
         `INSERT INTO feed_events (user_id, type, ref_id, payload) VALUES ($1, 'comeback', $2, $3)`,
@@ -394,17 +369,156 @@ app.post('/api/results', wrap(async (req, res) => {
     }
 
     const newBadges = await evaluateBadges(client, { userId, result, workout });
-
     await client.query('COMMIT');
     // Logging a workout can fulfill an active commitment (kept → feed celebration).
     const commitmentsKept = await resolveCommitmentsForUser(userId);
-    res.status(201).json({ result, newBadges, prs, comeback, commitmentsKept });
+    return { result, newBadges, prs, comeback, commitmentsKept };
   } catch (e) {
     await client.query('ROLLBACK');
     throw e;
   } finally {
     client.release();
   }
+}
+
+// ---- API: submit a result (manual log) --------------------------------------
+// Computes the Holistic Score + metrics server-side, then runs the shared
+// recordResult path (identical downstream effects to a WurQ sync).
+app.post('/api/results', wrap(async (req, res) => {
+  const body = req.body || {};
+  const userId = body.userId || body.user_id;
+  const workoutId = body.workoutId || body.workout_id;
+
+  if (!isUuid(userId)) return res.status(400).json({ error: 'A valid userId is required.' });
+  if (!isUuid(workoutId)) return res.status(400).json({ error: 'A valid workoutId is required.' });
+
+  const time_seconds = Number(body.time_seconds);
+  const rom_pct = Number(body.rom_pct);
+  const unbroken_sets = Number(body.unbroken_sets);
+
+  if (!Number.isFinite(time_seconds) || time_seconds <= 0 || time_seconds > 86400) {
+    return res.status(400).json({ error: 'time_seconds must be a number between 1 and 86400.' });
+  }
+  if (!Number.isFinite(rom_pct) || rom_pct < 0 || rom_pct > 100) {
+    return res.status(400).json({ error: 'rom_pct must be between 0 and 100.' });
+  }
+  if (!Number.isInteger(unbroken_sets) || unbroken_sets < 0 || unbroken_sets > 1000) {
+    return res.status(400).json({ error: 'unbroken_sets must be a whole number between 0 and 1000.' });
+  }
+
+  const userExists = await pool.query('SELECT 1 FROM users WHERE user_id = $1', [userId]);
+  if (!userExists.rows[0]) return res.status(404).json({ error: 'User not found.' });
+  const workoutRow = await pool.query(
+    'SELECT workout_id, name FROM workouts WHERE workout_id = $1', [workoutId]);
+  if (!workoutRow.rows[0]) return res.status(404).json({ error: 'Workout not found.' });
+  const workout = workoutRow.rows[0];
+
+  const holistic_score = computeHolisticScore({ time_seconds, rom_pct, unbroken_sets });
+  const metrics = deriveMetrics({ workoutName: workout.name, time_seconds, rom_pct, unbroken_sets });
+
+  const out = await recordResult({ userId, workout, time_seconds, rom_pct, unbroken_sets, holistic_score, metrics, source: 'manual' });
+  res.status(201).json(out);
+}));
+
+// ============================================================================
+// WurQ app integration — workout ingestion (MOCK, structured like the real one)
+// ----------------------------------------------------------------------------
+// The WurQ iOS app POSTs a workout here; we match the athlete to a platform user
+// (by email, the existing match key), resolve the workout, and run the SAME
+// recordResult path a manual log does. All WurQ-specific field mapping lives in
+// ./wurqAdapter — see its TODO for the real-API swap.
+// ============================================================================
+const { parseWurqWorkout, WurqPayloadError } = require('./wurqAdapter');
+// Mock shared secret. TODO(wurq-integration): replace with real WurQ-issued API
+// credentials / signature verification once we have an integration account.
+const WURQ_TOKEN = process.env.WURQ_INTEGRATION_TOKEN || 'wurq-demo-secret';
+
+// Resolve (or create) the workouts row a synced workout attaches to, so synced
+// results land on the same leaderboards as manual ones.
+async function resolveWorkout(client, name, type, performedAt) {
+  const date = (performedAt instanceof Date && !Number.isNaN(performedAt.getTime()) ? performedAt : new Date());
+  const dateStr = date.toISOString().slice(0, 10);
+  const found = await client.query(
+    `SELECT workout_id, name FROM workouts WHERE name = $1 AND wod_date = $2::date ORDER BY workout_id LIMIT 1`,
+    [name, dateStr]);
+  if (found.rows[0]) return found.rows[0];
+  const ins = await client.query(
+    `INSERT INTO workouts (name, type, description, wod_date) VALUES ($1, $2, $3, $4::date)
+       RETURNING workout_id, name`,
+    [name, type || 'For Time', `${name} — synced from WurQ.`, dateStr]);
+  return ins.rows[0];
+}
+
+app.post('/api/integrations/wurq/workout', wrap(async (req, res) => {
+  // Mock authentication — structured like a real authenticated integration.
+  const token = req.get('x-wurq-token') || (req.body && req.body.token);
+  if (token !== WURQ_TOKEN) return res.status(401).json({ error: 'Invalid or missing WurQ integration token.' });
+
+  // ALL WurQ-shape parsing is isolated in the adapter.
+  let parsed;
+  try { parsed = parseWurqWorkout(req.body); }
+  catch (e) { if (e instanceof WurqPayloadError) return res.status(422).json({ error: e.message }); throw e; }
+
+  // Match the external athlete to a platform user — email is the match key.
+  let user = null;
+  if (parsed.external.email) {
+    user = (await pool.query('SELECT user_id FROM users WHERE email = $1', [parsed.external.email])).rows[0] || null;
+  }
+  if (!user && parsed.external.wurqUserId) {
+    user = (await pool.query('SELECT user_id FROM profiles WHERE wurq_user_id = $1 LIMIT 1', [parsed.external.wurqUserId])).rows[0] || null;
+  }
+  if (!user) return res.status(404).json({ error: 'No matching athlete for this WurQ account. Ask them to sign up with the same email.' });
+  const userId = user.user_id;
+
+  // Resolve workout + finalize score/metrics (WurQ supplies sensor metrics;
+  // fall back to the platform's own computation only if a field is missing).
+  const client0 = await pool.connect();
+  let workout;
+  try { workout = await resolveWorkout(client0, parsed.workout.name, parsed.workout.type, parsed.workout.performedAt); }
+  finally { client0.release(); }
+
+  const holistic_score = parsed.holistic_score != null
+    ? Math.round(parsed.holistic_score * 100) / 100
+    : computeHolisticScore({ time_seconds: parsed.time_seconds, rom_pct: parsed.rom_pct, unbroken_sets: parsed.unbroken_sets });
+  const derived = deriveMetrics({ workoutName: workout.name, time_seconds: parsed.time_seconds, rom_pct: parsed.rom_pct, unbroken_sets: parsed.unbroken_sets });
+  const m = parsed.metrics;
+  const metrics = {
+    avg_hr: m.avg_hr ?? derived.avg_hr,
+    peak_hr: m.peak_hr ?? derived.peak_hr,
+    calories: m.calories ?? derived.calories,
+    power_output: m.power_output ?? derived.power_output,
+    work_volume: m.work_volume ?? derived.work_volume,
+    movements: m.movements && m.movements.length ? m.movements : derived.movements,
+  };
+
+  const out = await recordResult({
+    userId, workout, time_seconds: parsed.time_seconds, rom_pct: parsed.rom_pct,
+    unbroken_sets: parsed.unbroken_sets, holistic_score, metrics, source: 'wurq',
+    performedAt: parsed.workout.performedAt,
+  });
+  // A sync implies a live connection — keep the connected flag fresh.
+  await pool.query(
+    `UPDATE profiles SET wurq_connected = true, wurq_user_id = COALESCE(wurq_user_id, $2) WHERE user_id = $1`,
+    [userId, parsed.external.wurqUserId]);
+
+  res.status(201).json({ ok: true, source: 'wurq', workout: { workout_id: workout.workout_id, name: workout.name }, ...out });
+}));
+
+// ---- API: WurQ connect / disconnect (mock OAuth handshake) -------------------
+// TODO(wurq-integration): replace this mock confirm with real WurQ SSO/OAuth so
+// linking the account is a true authenticated handshake.
+app.post('/api/integrations/wurq/connect', wrap(async (req, res) => {
+  const b = req.body || {};
+  const userId = b.userId || b.user_id;
+  if (!isUuid(userId)) return res.status(400).json({ error: 'A valid userId is required.' });
+  const connect = b.action !== 'disconnect';
+  const wurqUserId = typeof b.wurqUserId === 'string' ? b.wurqUserId : null;
+  const r = await pool.query(
+    `UPDATE profiles SET wurq_connected = $2, wurq_user_id = COALESCE($3, wurq_user_id) WHERE user_id = $1
+       RETURNING wurq_connected`,
+    [userId, connect, wurqUserId]);
+  if (!r.rows[0]) return res.status(404).json({ error: 'Profile not found.' });
+  res.json({ ok: true, wurq_connected: r.rows[0].wurq_connected });
 }));
 
 // ---- API: in-box leaderboard ------------------------------------------------
@@ -1462,7 +1576,7 @@ app.get('/api/athlete/:userId/session/:resultId', wrap(async (req, res) => {
   if (!isUuid(userId) || !isUuid(resultId)) return res.status(400).json({ error: 'Invalid id.' });
   const { rows } = await pool.query(
     `SELECT r.result_id, r.time_seconds, r.rom_pct, r.unbroken_sets, r.holistic_score,
-            r.avg_hr, r.peak_hr, r.calories, r.power_output, r.work_volume, r.movements, r.created_at,
+            r.avg_hr, r.peak_hr, r.calories, r.power_output, r.work_volume, r.movements, r.source, r.created_at,
             w.name, w.type, w.description, w.wod_date
        FROM results r JOIN workouts w ON w.workout_id = r.workout_id
       WHERE r.user_id = $1 AND r.result_id = $2`, [userId, resultId]);
@@ -1471,7 +1585,7 @@ app.get('/api/athlete/:userId/session/:resultId', wrap(async (req, res) => {
   res.json({
     session: {
       result_id: s.result_id, name: s.name, type: s.type, description: s.description,
-      wod_date: toDate(s.wod_date),
+      wod_date: toDate(s.wod_date), source: s.source || 'manual',
       time_seconds: s.time_seconds, rom_pct: Number(s.rom_pct), unbroken_sets: s.unbroken_sets,
       holistic_score: Number(s.holistic_score),
       avg_hr: s.avg_hr, peak_hr: s.peak_hr, calories: s.calories,
@@ -1591,7 +1705,7 @@ app.get('/api/athlete/:userId/profile', wrap(async (req, res) => {
   }
 
   res.json({
-    user: { display_name: prof.display_name, gym_name: prof.gym_name, experience_level: prof.experience_level, avatar_url: prof.avatar_url, box_id: prof.box_id, is_coach: prof.is_coach, connection_count: prof.connection_count },
+    user: { display_name: prof.display_name, gym_name: prof.gym_name, experience_level: prof.experience_level, avatar_url: prof.avatar_url, box_id: prof.box_id, is_coach: prof.is_coach, connection_count: prof.connection_count, wurq_connected: prof.wurq_connected },
     summary: { sessions_total: R.length, current_streak, trained_today, longest_streak: longest, this_week_avg, last_week_avg },
     prs: { best_holistic: bestH, fastest, highest_power: bestP, longest_streak: longest },
     heatmap, trend, workload, comparison, benchmarks,
@@ -2147,6 +2261,8 @@ app.get('/api/health', wrap(async (req, res) => {
              (SELECT COUNT(*) FROM head_to_heads)::int AS head_to_heads,
              (SELECT COUNT(*) FROM commitments)::int AS commitments,
              (SELECT COUNT(*) FROM box_finances)::int AS box_finances,
+             (SELECT COUNT(*) FROM profiles WHERE wurq_connected)::int AS wurq_connected,
+             (SELECT COUNT(*) FROM results WHERE source = 'wurq')::int AS wurq_synced_results,
              EXISTS (SELECT 1 FROM boxes WHERE name = $1) AS world_seeded`, [SEED_SENTINEL_BOX]);
     counts = r.rows[0];
   } catch (e) { counts = { error: e.message }; }

@@ -45,6 +45,10 @@ const SCHEMA_SQL = `
     units            TEXT NOT NULL DEFAULT 'lb',
     profile_complete BOOLEAN NOT NULL DEFAULT false,
     referral_points  INTEGER NOT NULL DEFAULT 0,
+    -- WurQ app integration: set when the athlete links their WurQ account so
+    -- workouts sync automatically (mock OAuth now; real SSO/OAuth later).
+    wurq_connected   BOOLEAN NOT NULL DEFAULT false,
+    wurq_user_id     TEXT,
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
   );
 
@@ -103,6 +107,9 @@ const SCHEMA_SQL = `
     power_output   NUMERIC(7,1),
     work_volume    NUMERIC(9,1),
     movements      JSONB NOT NULL DEFAULT '[]'::jsonb,
+    -- How this result entered the platform: 'manual' (typed) or 'wurq' (synced
+    -- from the WurQ app with auto-captured sensor metrics).
+    source         TEXT NOT NULL DEFAULT 'manual',
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     -- One result per athlete per workout; re-logging updates the existing row.
     UNIQUE (user_id, workout_id)
@@ -328,6 +335,10 @@ const FIXUP_SQL = `
   ALTER TABLE results ADD COLUMN IF NOT EXISTS movements    JSONB NOT NULL DEFAULT '[]'::jsonb;
 
   ALTER TABLE profiles ADD COLUMN IF NOT EXISTS referral_points INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE profiles ADD COLUMN IF NOT EXISTS wurq_connected BOOLEAN NOT NULL DEFAULT false;
+  ALTER TABLE profiles ADD COLUMN IF NOT EXISTS wurq_user_id   TEXT;
+
+  ALTER TABLE results  ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'manual';
 
   ALTER TABLE workouts ADD COLUMN IF NOT EXISTS scaling       TEXT;
   ALTER TABLE workouts ADD COLUMN IF NOT EXISTS programmed_by UUID REFERENCES users(user_id) ON DELETE SET NULL;

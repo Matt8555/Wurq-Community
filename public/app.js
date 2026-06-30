@@ -27,6 +27,86 @@ let followingSet = null;         // Set of user_ids the current user follows
 const likedPosts = new Set();    // client-only like state for the Circle mock
 let pendingAvatarUrl = null;
 
+// WurQ app integration (MOCK). In production the WurQ iOS app POSTs workouts to
+// the ingestion endpoint with its own credentials — the browser never holds this
+// token. It lives here ONLY to power the demo "Simulate WurQ sync" affordance.
+// TODO(wurq-integration): remove the client-side token; real syncs are
+// app-authenticated, and "Connect" becomes a real WurQ SSO/OAuth handshake.
+const WURQ_DEMO_TOKEN = 'wurq-demo-secret';
+
+// Build a realistic WurQ-shaped workout payload (auto-captured sensor metrics),
+// the way the WurQ app would for today's WOD. Randomized a little per call.
+function buildWurqPayload(email, workout) {
+  const r = (lo, hi) => Math.round(lo + Math.random() * (hi - lo));
+  const time = r(170, 260);
+  const rom = r(88, 98);
+  const avg = r(160, 176);
+  return {
+    athlete: { email, wurq_user_id: 'wq_' + (email || 'demo').split('@')[0] },
+    workout: { name: workout.name, type: workout.type || 'For Time', performed_at: new Date().toISOString() },
+    metrics: {
+      duration_sec: time,
+      range_of_motion_pct: rom,
+      unbroken_sets: r(4, 9),
+      heart_rate: { avg_bpm: avg, peak_bpm: avg + r(10, 20) },
+      calories_kcal: r(120, 170),
+      power_output_w: Math.round((280 + Math.random() * 180) * 10) / 10,
+      work_volume_kg: r(4200, 6200),
+      // holistic_score intentionally omitted — let the platform compute it, like
+      // the manual path, so the demo shows server-side scoring of a sync too.
+    },
+  };
+}
+
+// Post a workout exactly as the WurQ app would (mock). In production this fires
+// from the WurQ app, NOT a button — see the "Simulate WurQ sync" demo control.
+async function postWurqSync(payload) {
+  const res = await fetch('/api/integrations/wurq/workout', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-wurq-token': WURQ_DEMO_TOKEN },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json().catch(() => null);
+  if (!res.ok) throw new Error((data && data.error) || `Sync failed (${res.status})`);
+  return data;
+}
+
+async function setWurqConnected(connected) {
+  const r = await api('POST', '/api/integrations/wurq/connect', { userId, action: connected ? 'connect' : 'disconnect' });
+  if (profile) profile.wurq_connected = r.wurq_connected;
+  return r.wurq_connected;
+}
+
+// Mock OAuth-style handshake to link the WurQ account. Visual confirm only.
+// TODO(wurq-integration): replace with real WurQ SSO/OAuth — redirect/authorize,
+// exchange a token, then persist the connection.
+function openWurqConnect(onDone) {
+  const ov = el(`
+    <div class="wurq-overlay">
+      <div class="wurq-modal">
+        <div class="wurq-logo big">Wur<span>Q</span></div>
+        <div class="wm-title">Connect your WurQ account</div>
+        <div class="wm-sub">Authorize WurQ to sync your workouts to this community automatically — scores, ROM, power, heart rate &amp; more, captured by the app.</div>
+        <div class="wm-scopes">
+          <div>✓ Read your completed workouts</div>
+          <div>✓ Sync sensor metrics</div>
+          <div>✓ Keep your leaderboard live</div>
+        </div>
+        <button class="btn-primary" id="wmAuth">Authorize &amp; connect</button>
+        <button class="link" id="wmCancel">Not now</button>
+        <div class="demo-note">Mock OAuth for the demo — becomes real WurQ SSO once we have access.</div>
+      </div>
+    </div>`);
+  document.body.appendChild(ov);
+  const close = () => ov.remove();
+  ov.querySelector('#wmCancel').addEventListener('click', close);
+  ov.querySelector('#wmAuth').addEventListener('click', async (e) => {
+    const btn = e.currentTarget; btn.disabled = true; btn.textContent = 'Authorizing…';
+    try { await setWurqConnected(true); showToast('WurQ connected ⌚'); close(); if (onDone) onDone(); }
+    catch (err) { btn.disabled = false; btn.textContent = 'Authorize & connect'; showToast(err.message); }
+  });
+}
+
 // Role (athlete vs gym owner). For the demo, the owner owns OWNER_BOX_NAME.
 const OWNER_BOX_NAME = 'CrossFit Borderland';
 let role = localStorage.getItem('wurq_role') === 'owner' ? 'owner' : 'athlete';
@@ -436,6 +516,7 @@ async function renderRichProfile(targetId, opts) {
   const u = d.user, s = d.summary, prs = d.prs, cmp = d.comparison;
   const avatar = u.avatar_url;
   const coachBadge = u.is_coach ? ' <span class="coach-tag">Coach</span>' : '';
+  const wurqChip = u.wurq_connected ? ' <span class="wurq-tag">⌚ WurQ</span>' : '';
   const backLink = ro ? `<button class="back-link" id="profBack">← Back</button>` : '';
   const header = `
     ${backLink}
@@ -444,7 +525,7 @@ async function renderRichProfile(targetId, opts) {
         ${avatar ? `<img src="${escapeAttr(avatar)}" alt="" style="width:100%;height:100%;object-fit:cover"/>` : initials(u.display_name)}
       </div>
       <div class="prof-id">
-        <div class="prof-name">${escapeHtml(u.display_name || 'Athlete')}${coachBadge}</div>
+        <div class="prof-name">${escapeHtml(u.display_name || 'Athlete')}${coachBadge}${wurqChip}</div>
         <div class="prof-sub">${u.is_coach ? 'Coaches at ' : ''}${escapeHtml(u.gym_name || 'No box')}${u.experience_level ? ' · ' + labelFor(u.experience_level) : ''}</div>
       </div>
       ${ro ? '' : '<button class="edit-btn" id="editProfile">Edit</button>'}
@@ -476,6 +557,10 @@ async function renderRichProfile(targetId, opts) {
       ${header}
 
       ${(!ro && u.is_coach) ? '<button class="coach-cta" id="coachTools">🎯 Coach tools — program, roster &amp; announce</button>' : ''}
+
+      ${!ro ? (u.wurq_connected
+        ? '<div class="wurq-prof on"><span><span class="wurq-dot"></span> WurQ connected — workouts sync automatically</span><button class="link" id="wurqManage">Disconnect</button></div>'
+        : '<button class="wurq-prof off" id="wurqConnectProf">⌚ Connect your WurQ app to sync workouts</button>') : ''}
 
       <div class="fitter">
         <div>
@@ -552,6 +637,12 @@ async function renderRichProfile(targetId, opts) {
   wireHeader();
   const ct = wrap.querySelector('#coachTools');
   if (ct) ct.addEventListener('click', () => renderCoach());
+  const wcp = wrap.querySelector('#wurqConnectProf');
+  if (wcp) wcp.addEventListener('click', () => openWurqConnect(() => renderRichProfile()));
+  const wmg = wrap.querySelector('#wurqManage');
+  if (wmg) wmg.addEventListener('click', async () => {
+    try { await setWurqConnected(false); showToast('WurQ disconnected'); renderRichProfile(); } catch (e) { showToast(e.message); }
+  });
   if (!ro) {
     const r2 = wrap.querySelector('#reset2');
     if (r2) r2.addEventListener('click', () => {
@@ -574,6 +665,7 @@ async function renderSession(resultId, athleteId, backOpts) {
       <button class="back-link" id="back">← Training history</button>
       <h1 class="title">${escapeHtml(s.name)}</h1>
       <p class="subtitle">${fmtDate(s.wod_date)} · ${escapeHtml(s.type || '')}</p>
+      ${s.source === 'wurq' ? '<div class="synced-banner">⌚ Synced from WurQ · metrics auto-captured</div>' : ''}
 
       <div class="card score-reveal">
         <div class="num">${s.holistic_score}</div>
@@ -624,11 +716,11 @@ async function renderLog() {
   try { w = await ensureWorkout(); }
   catch (e) { content.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
 
+  const connected = !!(profile && profile.wurq_connected);
   content.innerHTML = '';
   content.appendChild(el(`
     <div>
-      <h1 class="title">Log your WOD</h1>
-      <p class="subtitle">Enter your numbers — your Holistic Score is calculated for you.</p>
+      <h1 class="title">Today's WOD</h1>
 
       <div class="card">
         <div class="wod-head">
@@ -641,7 +733,27 @@ async function renderLog() {
         ${w.scaling ? `<div class="wod-scale"><span class="ws-lab">Scaling</span>${escapeHtml(w.scaling)}</div>` : ''}
       </div>
 
-      <div class="card">
+      <!-- WurQ sync is the primary flow: workouts arrive from the app. -->
+      <div class="wurq-card ${connected ? 'on' : 'off'}">
+        <div class="wurq-top">
+          <div class="wurq-logo">Wur<span>Q</span></div>
+          <div class="wurq-state">${connected
+            ? '<span class="wurq-dot"></span> Connected — workouts sync automatically'
+            : 'Connect your WurQ app to sync workouts automatically'}</div>
+        </div>
+        ${connected ? `
+          <p class="wurq-sub">Finish a workout in the WurQ app and it lands here with full sensor metrics — ROM, power, heart rate &amp; work volume, auto-captured.</p>
+          <button class="btn-primary wurq-sim" id="wurqSim">⌚ Simulate WurQ sync</button>
+          <div class="demo-note">Demo control — in production this fires from the WurQ app, not a button.</div>
+        ` : `
+          <button class="btn-primary" id="wurqConnect">Connect WurQ app</button>
+        `}
+        <div class="error" id="wErr"></div>
+      </div>
+
+      <button class="link manual-toggle" id="manualToggle">${connected ? 'Log manually instead' : 'Or log manually'}</button>
+      <div class="card manual-card ${connected ? 'hidden' : ''}" id="manualCard">
+        <div class="manual-lab">✍️ Manual entry</div>
         <label class="field"><span class="lbl">Your time (mm:ss)</span>
           <input type="text" id="time" inputmode="numeric" placeholder="3:45" /></label>
 
@@ -659,6 +771,27 @@ async function renderLog() {
       </div>
     </div>
   `));
+
+  // WurQ connect (mock OAuth) — flips the connected state.
+  const wErr = content.querySelector('#wErr');
+  const connectBtn = content.querySelector('#wurqConnect');
+  if (connectBtn) connectBtn.addEventListener('click', () => openWurqConnect(() => renderLog()));
+
+  // Simulate a workout arriving from the WurQ app.
+  const simBtn = content.querySelector('#wurqSim');
+  if (simBtn) simBtn.addEventListener('click', async () => {
+    wErr.textContent = '';
+    simBtn.disabled = true; simBtn.textContent = '⌚ Syncing from WurQ…';
+    try {
+      const payload = buildWurqPayload(profile.email, w);
+      const resp = await postWurqSync(payload);
+      showToast('Synced from WurQ ⌚');
+      renderLogged(resp.result, w, resp.newBadges || [], resp.prs || [], resp.comeback, { synced: true, metrics: payload.metrics });
+    } catch (e) { wErr.textContent = e.message; simBtn.disabled = false; simBtn.textContent = '⌚ Simulate WurQ sync'; }
+  });
+
+  const manualToggle = content.querySelector('#manualToggle');
+  manualToggle.addEventListener('click', () => content.querySelector('#manualCard').classList.toggle('hidden'));
 
   const rom = content.querySelector('#rom');
   const romVal = content.querySelector('#romVal');
@@ -702,14 +835,29 @@ function countUp(node, target) {
   requestAnimationFrame(step);
 }
 
-function renderLogged(saved, w, newBadges, prs, comeback) {
+function renderLogged(saved, w, newBadges, prs, comeback, opts) {
   prs = prs || [];
+  opts = opts || {};
   const score = Number(saved.holistic_score);
+  const m = opts.metrics || {};
+  const hr = m.heart_rate || {};
+  // Sensor metrics auto-captured by WurQ (shown as captured, not typed).
+  const sensorGrid = opts.synced ? `
+    <div class="synced-banner">⌚ Synced from your WurQ app · <span>auto-captured</span></div>
+    <div class="sensor-grid">
+      <div class="sensor"><div class="sv">${Math.round(saved.rom_pct)}%</div><div class="sl">ROM</div></div>
+      <div class="sensor"><div class="sv">${m.power_output_w != null ? Math.round(m.power_output_w) + 'W' : '—'}</div><div class="sl">Avg power</div></div>
+      <div class="sensor"><div class="sv">${hr.avg_bpm ?? '—'}</div><div class="sl">Avg HR</div></div>
+      <div class="sensor"><div class="sv">${hr.peak_bpm ?? '—'}</div><div class="sl">Peak HR</div></div>
+      <div class="sensor"><div class="sv">${m.calories_kcal ?? '—'}</div><div class="sl">Calories</div></div>
+      <div class="sensor"><div class="sv">${m.work_volume_kg != null ? Math.round(m.work_volume_kg) : '—'}</div><div class="sl">Volume kg</div></div>
+    </div>` : '';
   content.innerHTML = '';
   content.appendChild(el(`
     <div>
-      <h1 class="title">${prs.length ? 'New PR! 🎉' : (comeback ? 'You\'re back! 🔥' : 'Nice work!')}</h1>
+      <h1 class="title">${prs.length ? 'New PR! 🎉' : (comeback ? 'You\'re back! 🔥' : (opts.synced ? 'Workout synced ⌚' : 'Nice work!'))}</h1>
       <p class="subtitle">${escapeHtml(w.name)} · ${fmtTime(saved.time_seconds)} · ${Math.round(saved.rom_pct)}% ROM</p>
+      ${sensorGrid}
       ${comeback ? `<div class="pr-celebrate"><div class="pc-burst">🔥</div><div class="pc-title">Comeback</div><div class="pc-msg">${escapeHtml(comeback.message || 'Welcome back!')}</div></div>` : ''}
       ${prs.map((pr) => `
         <div class="pr-celebrate">
@@ -847,7 +995,8 @@ function feedText(ev) {
     return `${name} posted a box announcement 📣<div class="feed-post">${escapeHtml(p.text || '')}</div>`;
   }
   if (ev.type === 'result_logged') {
-    return `${name} logged <b>${escapeHtml(p.workout_name || 'a workout')}</b> — <span class="accent">${num(p.holistic_score)}</span>`;
+    const wurq = p.source === 'wurq' ? ' <span class="wurq-tag">⌚ WurQ</span>' : '';
+    return `${name} ${p.source === 'wurq' ? 'synced' : 'logged'} <b>${escapeHtml(p.workout_name || 'a workout')}</b> — <span class="accent">${num(p.holistic_score)}</span>${wurq}`;
   }
   if (ev.type === 'badge_earned') {
     return `${name} earned the <span class="accent">${escapeHtml(p.name || 'a')}</span> badge <span class="feed-badge">🏅</span>`;
@@ -2242,6 +2391,14 @@ async function renderOnboarding() {
         <div id="obCoaches"></div>
       </div>` : ''}
 
+      <div class="ob-step">
+        <div class="ob-head"><span class="ob-num">${d.coaches.length ? 5 : 4}</span> Connect your WurQ app</div>
+        <div class="card ob-card" id="obWurq">
+          <div><b>Sync workouts automatically</b><div class="muted-note" id="obWurqState">Link WurQ so every workout lands here with full sensor metrics.</div></div>
+          <button class="btn-primary" id="obWurqBtn" style="width:auto">Connect</button>
+        </div>
+      </div>
+
       <button class="btn-primary" id="obDone">I'm ready — let's go</button>
       <div class="center" style="margin-top:10px"><button class="link" id="obSkip">Skip for now</button></div>
     </div>
@@ -2274,6 +2431,17 @@ async function renderOnboarding() {
     if (fb) row.querySelector('.op-follow').appendChild(fb);
     cc.appendChild(row);
   });
+
+  // WurQ connect step (mock OAuth). Reflects the connected state in place.
+  const obWurqBtn = wrap.querySelector('#obWurqBtn');
+  const paintWurq = () => {
+    if (profile && profile.wurq_connected) {
+      wrap.querySelector('#obWurqState').innerHTML = '<span class="wurq-dot"></span> Connected — workouts sync automatically';
+      obWurqBtn.textContent = 'Connected ✓'; obWurqBtn.disabled = true;
+    }
+  };
+  paintWurq();
+  obWurqBtn.addEventListener('click', () => openWurqConnect(paintWurq));
 
   wrap.querySelector('#obDone').addEventListener('click', finish);
   wrap.querySelector('#obSkip').addEventListener('click', () => renderRichProfile());
