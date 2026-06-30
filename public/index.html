@@ -34,7 +34,8 @@
     /* Phone-sized frame */
     .phone {
       width: 100%;
-      max-width: 430px;
+      max-width: 480px;
+      margin: 0 auto;
       min-height: 100vh;
       display: flex;
       flex-direction: column;
@@ -181,7 +182,7 @@
     /* Bottom nav (phone) */
     .nav {
       position: fixed; bottom: 0; left: 50%; transform: translateX(-50%);
-      width: 100%; max-width: 430px;
+      width: 100%; max-width: 480px;
       display: flex; justify-content: space-around;
       background: rgba(10, 12, 8, 0.92);
       border-top: 1px solid var(--border);
@@ -195,6 +196,23 @@
     }
     .nav a.active { color: var(--acid); }
     .nav a .ico { display: block; font-size: 1.05rem; margin-bottom: 3px; }
+
+    /* Desktop framing only — above 480px, present the centered column as a
+       deliberate mobile-app view: faint lighter shade + thin side edges + soft
+       shadow, with the fixed bottom nav aligned to the same column. Phones
+       (<=480px) are untouched and render full-width exactly as before. */
+    @media (min-width: 481px) {
+      .phone {
+        background: rgba(255, 255, 255, 0.02);
+        border-left: 1px solid var(--border);
+        border-right: 1px solid var(--border);
+        box-shadow: 0 0 60px rgba(0, 0, 0, 0.45);
+      }
+      .nav {
+        border-left: 1px solid var(--border);
+        border-right: 1px solid var(--border);
+      }
+    }
 
     /* WOD / Log screen */
     .wod-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
