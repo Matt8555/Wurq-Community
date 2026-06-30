@@ -49,6 +49,8 @@ const SCHEMA_SQL = `
     -- workouts sync automatically (mock OAuth now; real SSO/OAuth later).
     wurq_connected   BOOLEAN NOT NULL DEFAULT false,
     wurq_user_id     TEXT,
+    -- Veteran opt-in to be a "welcome buddy" for new members.
+    welcome_buddy    BOOLEAN NOT NULL DEFAULT false,
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
   );
 
@@ -308,6 +310,21 @@ const SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_commitments_user  ON commitments(user_id);
   CREATE INDEX IF NOT EXISTS idx_commitments_box   ON commitments(box_id, status);
   CREATE INDEX IF NOT EXISTS idx_commitments_coach ON commitments(coach_id);
+
+  -- Buddy / mentor pairing — the research-prescribed retention mechanic. A new
+  -- member is paired with an opted-in veteran ("welcome buddy") for their first
+  -- month. (Veterans opt in via profiles.welcome_buddy.)
+  CREATE TABLE IF NOT EXISTS buddies (
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    new_member_user_id  UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    mentor_user_id      UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    box_id              UUID REFERENCES boxes(box_id) ON DELETE CASCADE,
+    started_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    status              TEXT NOT NULL DEFAULT 'active',  -- active | completed
+    UNIQUE (new_member_user_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_buddies_mentor ON buddies(mentor_user_id);
+  CREATE INDEX IF NOT EXISTS idx_buddies_box    ON buddies(box_id);
 `;
 
 // Idempotent fixups for databases created by earlier versions of this app:
@@ -337,6 +354,7 @@ const FIXUP_SQL = `
   ALTER TABLE profiles ADD COLUMN IF NOT EXISTS referral_points INTEGER NOT NULL DEFAULT 0;
   ALTER TABLE profiles ADD COLUMN IF NOT EXISTS wurq_connected BOOLEAN NOT NULL DEFAULT false;
   ALTER TABLE profiles ADD COLUMN IF NOT EXISTS wurq_user_id   TEXT;
+  ALTER TABLE profiles ADD COLUMN IF NOT EXISTS welcome_buddy  BOOLEAN NOT NULL DEFAULT false;
 
   ALTER TABLE results  ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'manual';
 
@@ -363,7 +381,11 @@ const SEED_BADGES_SQL = `
     ('sub_4_fran', 'Sub-4 Fran',  'Completed Fran in under 4 minutes.',
        '{"type":"time_under","workout_name":"Fran","seconds":240}'),
     ('century',    'Century',     'Logged your 100th result.',
-       '{"type":"nth_result","n":100}')
+       '{"type":"nth_result","n":100}'),
+    ('day_one',    'Day One',     'Logged your very first workout — welcome to the board!',
+       '{"type":"manual"}'),
+    ('first_week', 'First Week',  'Completed your first-week welcome path.',
+       '{"type":"manual"}')
   ON CONFLICT (code) DO NOTHING;
 `;
 

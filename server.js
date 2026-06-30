@@ -54,6 +54,7 @@ async function getProfileRow(userId) {
             COALESCE(p.profile_complete, false) AS profile_complete,
             COALESCE(p.referral_points, 0) AS referral_points,
             COALESCE(p.wurq_connected, false) AS wurq_connected,
+            COALESCE(p.welcome_buddy, false) AS welcome_buddy,
             p.wurq_user_id,
             p.updated_at,
             b.box_id, b.name AS box_name,
@@ -369,10 +370,29 @@ async function recordResult({ userId, workout, time_seconds, rom_pct, unbroken_s
     }
 
     const newBadges = await evaluateBadges(client, { userId, result, workout });
+
+    // First-workout celebration — extra fanfare + a "Day One" starter badge.
+    const cnt = (await client.query('SELECT COUNT(*)::int AS n FROM results WHERE user_id = $1', [userId])).rows[0].n;
+    const firstWorkout = cnt === 1;
+    if (firstWorkout) {
+      await client.query(
+        `INSERT INTO feed_events (user_id, type, ref_id, payload) VALUES ($1, 'first_workout', $2, $3)`,
+        [userId, result.result_id, JSON.stringify({ workout_name: workout.name, holistic_score: result.holistic_score })]);
+      const bd = (await client.query(
+        `INSERT INTO user_badges (user_id, badge_id) SELECT $1, badge_id FROM badges WHERE code = 'day_one'
+           ON CONFLICT (user_id, badge_id) DO NOTHING RETURNING badge_id`, [userId])).rows[0];
+      if (bd) {
+        await client.query(
+          `INSERT INTO feed_events (user_id, type, ref_id, payload) VALUES ($1, 'badge_earned', $2, $3)`,
+          [userId, bd.badge_id, JSON.stringify({ code: 'day_one', name: 'Day One', description: 'Logged your very first workout — welcome to the board!' })]);
+        newBadges.push({ code: 'day_one', name: 'Day One', description: 'Logged your very first workout — welcome to the board!' });
+      }
+    }
+
     await client.query('COMMIT');
     // Logging a workout can fulfill an active commitment (kept → feed celebration).
     const commitmentsKept = await resolveCommitmentsForUser(userId);
-    return { result, newBadges, prs, comeback, commitmentsKept };
+    return { result, newBadges, prs, comeback, commitmentsKept, firstWorkout };
   } catch (e) {
     await client.query('ROLLBACK');
     throw e;
@@ -1705,7 +1725,7 @@ app.get('/api/athlete/:userId/profile', wrap(async (req, res) => {
   }
 
   res.json({
-    user: { display_name: prof.display_name, gym_name: prof.gym_name, experience_level: prof.experience_level, avatar_url: prof.avatar_url, box_id: prof.box_id, is_coach: prof.is_coach, connection_count: prof.connection_count, wurq_connected: prof.wurq_connected },
+    user: { display_name: prof.display_name, gym_name: prof.gym_name, experience_level: prof.experience_level, avatar_url: prof.avatar_url, box_id: prof.box_id, is_coach: prof.is_coach, connection_count: prof.connection_count, wurq_connected: prof.wurq_connected, welcome_buddy: prof.welcome_buddy },
     summary: { sessions_total: R.length, current_streak, trained_today, longest_streak: longest, this_week_avg, last_week_avg },
     prs: { best_holistic: bestH, fastest, highest_power: bestP, longest_streak: longest },
     heatmap, trend, workload, comparison, benchmarks,
@@ -1765,8 +1785,11 @@ app.get('/api/box/:boxId/newcomers', wrap(async (req, res) => {
   const { boxId } = req.params;
   if (!isUuid(boxId)) return res.status(400).json({ error: 'Invalid box id.' });
   const { rows } = await pool.query(
-    `SELECT m.user_id, COALESCE(NULLIF(p.display_name,''),'Athlete') AS display_name, m.joined_at
+    `SELECT m.user_id, COALESCE(NULLIF(p.display_name,''),'Athlete') AS display_name, m.joined_at,
+            fe.event_id AS welcome_event_id, COALESCE(fe.kudos, 0) AS welcomed
        FROM box_memberships m LEFT JOIN profiles p ON p.user_id = m.user_id
+       LEFT JOIN LATERAL (SELECT event_id, kudos FROM feed_events
+                           WHERE user_id = m.user_id AND type = 'member_welcome' ORDER BY created_at LIMIT 1) fe ON true
       WHERE m.box_id = $1 AND m.joined_at >= now() - interval '7 days'
       ORDER BY m.joined_at DESC LIMIT 12`, [boxId]);
   res.json({ newcomers: rows });
@@ -2200,11 +2223,291 @@ app.get('/api/users/:userId/onboarding', wrap(async (req, res) => {
         AND EXISTS (SELECT 1 FROM results r WHERE r.user_id = m.user_id)
       ORDER BY random() LIMIT 5`, [boxId, userId])).rows;
 
+  // Kick off the welcome ritual: a public welcome event + a buddy pairing.
+  await ensureWelcomeEvent(userId, boxId, prof.display_name, prof.box_name);
+  const buddy = await ensureBuddy(userId, boxId, prof.experience_level);
+
   res.json({
     box: { box_id: boxId, name: prof.box_name },
     cohort: { squad_id: cohort.id, name: cohort.name, member_count: cohortCount },
-    coaches, suggestions,
+    coaches, suggestions, buddy,
     connection_count: prof.connection_count,
+  });
+}));
+
+// ============================================================================
+// New-member welcome ritual — builds ON the cohort/onboarding/coach system:
+// public welcome + one-tap greetings, a coach personal note + first-week
+// commitment, a buddy/mentor pairing, a gamified first-week milestone path,
+// first-workout fanfare, and a 30-day check-in. The goal is that every new
+// member forms multiple connections in week one (anti single-connection
+// fragility).
+// ============================================================================
+const shortBox = (name) => (name || '').replace(/^(CrossFit|CF)\s+/i, '').replace(/\s+CrossFit$/i, '').trim() || name;
+
+// Grant a badge by code (idempotent) + a badge_earned feed event. Returns the
+// badge if newly earned, else null.
+async function grantBadge(userId, code) {
+  const b = (await pool.query('SELECT badge_id, name, description FROM badges WHERE code = $1', [code])).rows[0];
+  if (!b) return null;
+  const ins = (await pool.query(
+    `INSERT INTO user_badges (user_id, badge_id) VALUES ($1, $2)
+       ON CONFLICT (user_id, badge_id) DO NOTHING RETURNING badge_id`, [userId, b.badge_id])).rows[0];
+  if (!ins) return null;
+  await pool.query(
+    `INSERT INTO feed_events (user_id, type, ref_id, payload) VALUES ($1, 'badge_earned', $2, $3)`,
+    [userId, b.badge_id, JSON.stringify({ code, name: b.name, description: b.description })]);
+  return { code, name: b.name, description: b.description };
+}
+
+// Ensure a public "Welcome [name] to [box]!" feed event exists (welcomes pile up
+// as kudos on it). Returns { event_id, count }.
+async function ensureWelcomeEvent(userId, boxId, displayName, boxName) {
+  let ev = (await pool.query(
+    `SELECT event_id, kudos FROM feed_events WHERE user_id = $1 AND type = 'member_welcome' LIMIT 1`, [userId])).rows[0];
+  if (!ev) {
+    ev = (await pool.query(
+      `INSERT INTO feed_events (user_id, type, payload, kudos) VALUES ($1, 'member_welcome', $2, 0)
+         RETURNING event_id, kudos`,
+      [userId, JSON.stringify({ new_member: displayName || 'a new member', box_name: boxName })])).rows[0];
+  }
+  return { event_id: ev.event_id, count: ev.kudos };
+}
+
+// Pair a new member with an opted-in veteran buddy (similar level if possible),
+// for their first month. Idempotent — returns the existing/created pairing.
+async function ensureBuddy(userId, boxId, expLevel) {
+  const existing = (await pool.query(
+    `SELECT b.mentor_user_id AS user_id, COALESCE(NULLIF(p.display_name,''),'Athlete') AS display_name,
+            p.avatar_url, b.started_at, b.status
+       FROM buddies b LEFT JOIN profiles p ON p.user_id = b.mentor_user_id
+      WHERE b.new_member_user_id = $1`, [userId])).rows[0];
+  if (existing) return existing;
+  const mentor = (await pool.query(
+    `SELECT m.user_id FROM box_memberships m JOIN profiles p ON p.user_id = m.user_id
+      WHERE m.box_id = $1 AND p.welcome_buddy = true AND m.user_id <> $2
+        AND NOT EXISTS (SELECT 1 FROM buddies bb WHERE bb.new_member_user_id = m.user_id)
+      ORDER BY (p.experience_level = $3) DESC, random() LIMIT 1`, [boxId, userId, expLevel || ''])).rows[0];
+  if (!mentor) return null;
+  await pool.query(
+    `INSERT INTO buddies (new_member_user_id, mentor_user_id, box_id) VALUES ($1, $2, $3)
+       ON CONFLICT (new_member_user_id) DO NOTHING`, [userId, mentor.user_id, boxId]);
+  // Notify the buddy (feed nudge to reach out).
+  await pool.query(
+    `INSERT INTO feed_events (user_id, type, payload) VALUES ($1, 'buddy_paired', $2)`,
+    [mentor.user_id, JSON.stringify({ new_member_user_id: userId })]);
+  return (await pool.query(
+    `SELECT b.mentor_user_id AS user_id, COALESCE(NULLIF(p.display_name,''),'Athlete') AS display_name,
+            p.avatar_url, b.started_at, b.status
+       FROM buddies b LEFT JOIN profiles p ON p.user_id = b.mentor_user_id
+      WHERE b.new_member_user_id = $1`, [userId])).rows[0];
+}
+
+// Public 30-day milestone (idempotent), the critical retention window.
+async function ensureThirtyDay(userId, joinedAt) {
+  if (!joinedAt) return false;
+  const days = Math.floor((Date.now() - new Date(joinedAt).getTime()) / 86400000);
+  if (days < 30) return false;
+  const has = (await pool.query(
+    `SELECT 1 FROM feed_events WHERE user_id = $1 AND type = 'milestone_30day' LIMIT 1`, [userId])).rowCount > 0;
+  if (!has) await pool.query(
+    `INSERT INTO feed_events (user_id, type, payload) VALUES ($1, 'milestone_30day', $2)`,
+    [userId, JSON.stringify({ days: 30 })]);
+  return true;
+}
+
+// The first-week milestone path — computed from existing data so it's always
+// honest. Returns the step list + counts.
+async function computeMilestones(userId, boxId) {
+  const r = (await pool.query(
+    `SELECT
+       (SELECT COUNT(*) FROM results WHERE user_id = $1)::int AS results,
+       (SELECT COUNT(*) FROM feed_events WHERE user_id = $1 AND type = 'highfive')::int AS fistbumps,
+       (SELECT COUNT(*) FROM follows WHERE follower_user_id = $1)::int AS follows,
+       (SELECT COUNT(*) FROM squad_members sm JOIN squads s ON s.id = sm.squad_id
+          WHERE sm.user_id = $1 AND s.box_id = $2 AND s.name LIKE '%New Crew%')::int AS cohort,
+       (SELECT COUNT(*) FROM follows f JOIN box_roles br ON br.user_id = f.followee_user_id AND br.box_id = $2
+          WHERE f.follower_user_id = $1 AND br.role IN ('coach','owner'))::int AS coach_follow,
+       (SELECT COUNT(*) FROM commitments WHERE user_id = $1 AND created_by = 'coach' AND status IN ('active','kept'))::int AS coach_commit,
+       (SELECT COUNT(*) FROM buddies b JOIN follows f ON f.follower_user_id = $1 AND f.followee_user_id = b.mentor_user_id
+          WHERE b.new_member_user_id = $1)::int AS buddy_follow,
+       (SELECT COUNT(*) FROM buddies WHERE new_member_user_id = $1)::int AS has_buddy`, [userId, boxId])).rows[0];
+  const steps = [
+    { key: 'first_workout', label: 'Log your first workout', done: r.results > 0 },
+    { key: 'fist_bump', label: 'Give a fist-bump', done: r.fistbumps > 0 },
+    { key: 'cohort', label: 'Join your New Crew squad', done: r.cohort > 0 },
+    { key: 'follow3', label: 'Follow 3 people', done: r.follows >= 3 },
+    { key: 'meet_coach', label: 'Meet your coach', done: r.coach_follow > 0 || r.coach_commit > 0 },
+    { key: 'buddy', label: 'Say hi to your buddy', done: r.has_buddy > 0 && r.buddy_follow > 0 },
+  ];
+  const done = steps.filter((s) => s.done).length;
+  return { steps, done, total: steps.length, complete: done === steps.length };
+}
+
+async function joinedAtFor(userId, boxId) {
+  const r = (await pool.query(
+    `SELECT MIN(joined_at) AS j FROM box_memberships WHERE user_id = $1 ${boxId ? 'AND box_id = $2' : ''}`,
+    boxId ? [userId, boxId] : [userId])).rows[0];
+  return r ? r.j : null;
+}
+
+// The new member's welcome experience (their "first experience").
+app.get('/api/users/:userId/welcome', wrap(async (req, res) => {
+  const { userId } = req.params;
+  if (!isUuid(userId)) return res.status(400).json({ error: 'Invalid user id.' });
+  const prof = await getProfileRow(userId);
+  if (!prof) return res.status(404).json({ error: 'User not found.' });
+  if (!prof.box_id) return res.json({ box: null });
+  const boxId = prof.box_id;
+
+  const welcome = await ensureWelcomeEvent(userId, boxId, prof.display_name, prof.box_name);
+  const buddy = await ensureBuddy(userId, boxId, prof.experience_level);
+  const joinedAt = await joinedAtFor(userId, boxId);
+  const daysSince = joinedAt ? Math.floor((Date.now() - new Date(joinedAt).getTime()) / 86400000) : 0;
+  const thirtyDay = await ensureThirtyDay(userId, joinedAt);
+
+  // Coach personal greeting + any pending first-week commitment from a coach.
+  const greeting = (await pool.query(
+    `SELECT f.payload->>'text' AS text, COALESCE(NULLIF(p.display_name,''),'Coach') AS coach_name, f.created_at
+       FROM feed_events f LEFT JOIN profiles p ON p.user_id = f.user_id
+      WHERE f.type = 'coach_welcome' AND f.payload->>'to_user_id' = $1
+      ORDER BY f.created_at DESC LIMIT 1`, [userId])).rows[0] || null;
+  const coachCommit = (await pool.query(
+    `SELECT c.id, c.target, c.status, COALESCE(NULLIF(p.display_name,''),'Coach') AS coach_name
+       FROM commitments c LEFT JOIN profiles p ON p.user_id = c.coach_id
+      WHERE c.user_id = $1 AND c.created_by = 'coach' AND c.status = 'pending'
+      ORDER BY c.created_at DESC LIMIT 1`, [userId])).rows[0] || null;
+
+  const milestones = await computeMilestones(userId, boxId);
+  let badge = null;
+  if (milestones.complete) {
+    badge = await grantBadge(userId, 'first_week'); // null if already earned
+    if (badge) await pool.query(
+      `INSERT INTO feed_events (user_id, type, payload) VALUES ($1, 'welcome_complete', $2)`,
+      [userId, JSON.stringify({ box_name: prof.box_name })]);
+  }
+  const firstWeekBadge = (await pool.query(
+    `SELECT 1 FROM user_badges ub JOIN badges b ON b.badge_id = ub.badge_id WHERE ub.user_id = $1 AND b.code = 'first_week'`, [userId])).rowCount > 0;
+
+  let buddyFollowing = false;
+  if (buddy) buddyFollowing = (await pool.query(
+    `SELECT 1 FROM follows WHERE follower_user_id = $1 AND followee_user_id = $2`, [userId, buddy.user_id])).rowCount > 0;
+
+  res.json({
+    box: { box_id: boxId, name: prof.box_name, short: shortBox(prof.box_name) },
+    member: { display_name: prof.display_name },
+    days_since_join: daysSince,
+    welcome,
+    coach: { greeting, pending_commitment: coachCommit },
+    buddy: buddy ? { ...buddy, following: buddyFollowing } : null,
+    milestones,
+    just_completed: !!badge,
+    first_week_badge: firstWeekBadge,
+    thirty_day: thirtyDay,
+  });
+}));
+
+// One-tap public welcome (a greeting, like kudos) on a member_welcome event.
+app.post('/api/feed/:eventId/welcome', wrap(async (req, res) => {
+  const { eventId } = req.params;
+  if (!isUuid(eventId)) return res.status(400).json({ error: 'Invalid event id.' });
+  const { rows } = await pool.query(
+    `UPDATE feed_events SET kudos = kudos + 1 WHERE event_id = $1 AND type = 'member_welcome' RETURNING kudos`, [eventId]);
+  if (!rows[0]) return res.status(404).json({ error: 'Welcome not found.' });
+  res.json({ ok: true, count: rows[0].kudos });
+}));
+
+// Veteran opts in / out as a welcome buddy.
+app.post('/api/users/:userId/buddy-optin', wrap(async (req, res) => {
+  const { userId } = req.params;
+  if (!isUuid(userId)) return res.status(400).json({ error: 'Invalid user id.' });
+  const optIn = (req.body || {}).optIn !== false;
+  const r = await pool.query(
+    `UPDATE profiles SET welcome_buddy = $2 WHERE user_id = $1 RETURNING welcome_buddy`, [userId, optIn]);
+  if (!r.rows[0]) return res.status(404).json({ error: 'Profile not found.' });
+  res.json({ ok: true, welcome_buddy: r.rows[0].welcome_buddy });
+}));
+
+// Coach sends a personal welcome note to a new member.
+app.post('/api/coach/welcome', wrap(async (req, res) => {
+  const b = req.body || {};
+  const coachId = b.coachId || b.coach_id;
+  const userId = b.userId || b.user_id;
+  const text = typeof b.text === 'string' ? b.text.trim().slice(0, 500) : '';
+  if (!isUuid(coachId) || !isUuid(userId)) return res.status(400).json({ error: 'Valid coachId and userId are required.' });
+  if (!text) return res.status(400).json({ error: 'Write a welcome note.' });
+  const boxId = await boxIdForUser(userId);
+  if (!boxId || !hasCoach(await rolesFor(coachId, boxId))) return res.status(403).json({ error: 'Only a coach of this member\'s box can do that.' });
+  const to = (await pool.query(`SELECT COALESCE(NULLIF(display_name,''),'Athlete') AS n FROM profiles WHERE user_id = $1`, [userId])).rows[0];
+  await pool.query(
+    `INSERT INTO feed_events (user_id, type, payload) VALUES ($1, 'coach_welcome', $2)`,
+    [coachId, JSON.stringify({ to_user_id: userId, to_name: to ? to.n : 'a new member', text })]);
+  res.status(201).json({ ok: true });
+}));
+
+// Coach records a 30-day check-in (clears the nudge).
+app.post('/api/coach/checkin', wrap(async (req, res) => {
+  const b = req.body || {};
+  const coachId = b.coachId || b.coach_id;
+  const userId = b.userId || b.user_id;
+  if (!isUuid(coachId) || !isUuid(userId)) return res.status(400).json({ error: 'Valid ids required.' });
+  const boxId = await boxIdForUser(userId);
+  if (!boxId || !hasCoach(await rolesFor(coachId, boxId))) return res.status(403).json({ error: 'Coaches only.' });
+  const to = (await pool.query(`SELECT COALESCE(NULLIF(display_name,''),'Athlete') AS n FROM profiles WHERE user_id = $1`, [userId])).rows[0];
+  await pool.query(
+    `INSERT INTO feed_events (user_id, type, payload) VALUES ($1, 'coach_checkin', $2)`,
+    [coachId, JSON.stringify({ to_user_id: userId, to_name: to ? to.n : 'a member' })]);
+  res.status(201).json({ ok: true });
+}));
+
+// Coach view: the welcome queue — new members + their integration status, plus
+// 30-day check-ins due, with early at-risk flags (low connections/activity).
+app.get('/api/box/:boxId/welcome-queue', wrap(async (req, res) => {
+  const { boxId } = req.params;
+  if (!isUuid(boxId)) return res.status(400).json({ error: 'Invalid box id.' });
+  const actingUserId = isUuid(req.query.userId) ? req.query.userId : null;
+  if (!hasCoach(await rolesFor(actingUserId, boxId))) return res.status(403).json({ error: 'Coaches only.' });
+
+  const { rows: newMembers } = await pool.query(
+    `SELECT m.user_id, COALESCE(NULLIF(p.display_name,''),'Athlete') AS display_name, m.joined_at,
+            (CURRENT_DATE - m.joined_at::date) AS days_since,
+            (SELECT COALESCE(MAX(kudos),0) FROM feed_events fe WHERE fe.user_id = m.user_id AND fe.type = 'member_welcome')::int AS welcomed,
+            EXISTS (SELECT 1 FROM buddies b WHERE b.new_member_user_id = m.user_id) AS buddy_paired,
+            EXISTS (SELECT 1 FROM feed_events fe WHERE fe.type = 'coach_welcome' AND fe.payload->>'to_user_id' = m.user_id::text) AS greeted,
+            EXISTS (SELECT 1 FROM commitments c WHERE c.user_id = m.user_id AND c.created_by = 'coach') AS commitment_asked,
+            (SELECT COUNT(*) FROM results r WHERE r.user_id = m.user_id)::int AS workouts,
+            ((SELECT COUNT(*) FROM follows f WHERE f.follower_user_id = m.user_id)
+             + (SELECT COUNT(*) FROM squad_members sm WHERE sm.user_id = m.user_id))::int AS connections
+       FROM box_memberships m LEFT JOIN profiles p ON p.user_id = m.user_id
+      WHERE m.box_id = $1 AND m.joined_at >= now() - interval '14 days'
+      ORDER BY m.joined_at DESC LIMIT 30`, [boxId]);
+
+  const withMs = [];
+  for (const n of newMembers) {
+    const ms = await computeMilestones(n.user_id, boxId);
+    const at_risk = (n.connections < 2 || n.workouts === 0) && Number(n.days_since) >= 3;
+    withMs.push({
+      user_id: n.user_id, display_name: n.display_name, days_since: Number(n.days_since),
+      welcomed: n.welcomed, buddy_paired: n.buddy_paired, greeted: n.greeted,
+      commitment_asked: n.commitment_asked, workouts: n.workouts, connections: n.connections,
+      milestone_done: ms.done, milestone_total: ms.total, at_risk,
+    });
+  }
+
+  // 30-day check-ins due: members ~30 days in without a check-in in the last 30d.
+  const { rows: checkins } = await pool.query(
+    `SELECT m.user_id, COALESCE(NULLIF(p.display_name,''),'Athlete') AS display_name,
+            (CURRENT_DATE - m.joined_at::date) AS days_since
+       FROM box_memberships m LEFT JOIN profiles p ON p.user_id = m.user_id
+      WHERE m.box_id = $1 AND m.joined_at <= now() - interval '28 days' AND m.joined_at >= now() - interval '45 days'
+        AND NOT EXISTS (SELECT 1 FROM feed_events fe WHERE fe.type = 'coach_checkin'
+                          AND fe.payload->>'to_user_id' = m.user_id::text AND fe.created_at >= now() - interval '30 days')
+      ORDER BY m.joined_at ASC LIMIT 20`, [boxId]);
+
+  res.json({
+    new_members: withMs,
+    checkins: checkins.map((c) => ({ ...c, days_since: Number(c.days_since) })),
+    summary: { new_count: withMs.length, at_risk: withMs.filter((m) => m.at_risk).length, checkins_due: checkins.length },
   });
 }));
 
@@ -2263,6 +2566,8 @@ app.get('/api/health', wrap(async (req, res) => {
              (SELECT COUNT(*) FROM box_finances)::int AS box_finances,
              (SELECT COUNT(*) FROM profiles WHERE wurq_connected)::int AS wurq_connected,
              (SELECT COUNT(*) FROM results WHERE source = 'wurq')::int AS wurq_synced_results,
+             (SELECT COUNT(*) FROM buddies)::int AS buddies,
+             (SELECT COUNT(*) FROM profiles WHERE welcome_buddy)::int AS welcome_buddies,
              EXISTS (SELECT 1 FROM boxes WHERE name = $1) AS world_seeded`, [SEED_SENTINEL_BOX]);
     counts = r.rows[0];
   } catch (e) { counts = { error: e.message }; }

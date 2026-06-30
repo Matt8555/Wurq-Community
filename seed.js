@@ -423,6 +423,7 @@ async function main() {
     await client.query('BEGIN');
 
     // Reset the world (deterministic rebuild). FK-safe order.
+    await client.query('DELETE FROM buddies');
     await client.query('DELETE FROM commitments');
     await client.query('DELETE FROM box_finances');
     await client.query('DELETE FROM head_to_heads');
@@ -973,6 +974,107 @@ async function main() {
         [a.userId]);
     }
 
+    // ---- New-member welcome ritual --------------------------------------------
+    // Opt veterans in as welcome buddies (established, active athletes), so new
+    // members can be paired. Demo logins opt in too.
+    const boxNameById = Object.fromEntries(Object.entries(boxIds).map(([n, id]) => [id, n]));
+    const buddyPoolByBox = {};
+    for (const box of BOX_DEFS) {
+      const pool2 = athletes.filter((a) => a.boxName === box.name && a.results.length >= 5).slice(2, 14);
+      buddyPoolByBox[box.name] = pool2;
+      for (const v of pool2) await client.query('UPDATE profiles SET welcome_buddy = true WHERE user_id = $1', [v.userId]);
+    }
+    for (const u of [matt, alex]) if (u) await client.query('UPDATE profiles SET welcome_buddy = true WHERE user_id = $1', [u.userId]);
+
+    // Run the ritual for each box's recent newcomers (created in the newcomers
+    // block above): a public welcome with greetings piling up + a buddy pairing.
+    const newcomers = (await client.query(
+      `SELECT m.user_id, m.box_id, COALESCE(NULLIF(p.display_name,''),'Athlete') AS display_name, p.experience_level
+         FROM box_memberships m JOIN profiles p ON p.user_id = m.user_id
+        WHERE m.joined_at >= now() - interval '7 days'`)).rows;
+    let bi = 0;
+    for (const nc of newcomers) {
+      const boxName = boxNameById[nc.box_id];
+      await client.query(
+        `INSERT INTO feed_events (user_id, type, payload, kudos, created_at)
+           VALUES ($1, 'member_welcome', $2, $3, now() - interval '1 day')`,
+        [nc.user_id, JSON.stringify({ new_member: nc.display_name, box_name: boxName, seed: 'true' }), 6 + Math.floor(frng() * 10)]);
+      // Pair with an opted-in veteran (prefer same level).
+      const poolB = (buddyPoolByBox[boxName] || []);
+      const mentor = poolB.find((v) => v.exp === nc.experience_level) || poolB[bi % Math.max(1, poolB.length)];
+      bi++;
+      if (mentor) {
+        await client.query(
+          `INSERT INTO buddies (new_member_user_id, mentor_user_id, box_id, started_at) VALUES ($1, $2, $3, now() - interval '1 day')
+             ON CONFLICT (new_member_user_id) DO NOTHING`, [nc.user_id, mentor.userId, nc.box_id]);
+        await client.query(
+          `INSERT INTO feed_events (user_id, type, payload, created_at) VALUES ($1, 'buddy_paired', $2, now() - interval '1 day')`,
+          [mentor.userId, JSON.stringify({ new_member_user_id: nc.user_id, seed: 'true' })]);
+      }
+    }
+
+    // Richer ritual at the home box: a coach greeting + first-week commitment +
+    // a partial milestone path on one newcomer.
+    const homeNewcomers = newcomers.filter((n) => n.box_id === borderId);
+    if (matt && homeNewcomers[0]) {
+      const nc = homeNewcomers[0];
+      await client.query(
+        `INSERT INTO feed_events (user_id, type, payload, created_at) VALUES ($1, 'coach_welcome', $2, now() - interval '20 hours')`,
+        [matt.userId, JSON.stringify({ to_user_id: nc.user_id, to_name: nc.display_name, text: `Welcome to Borderland, ${nc.display_name.split(' ')[0]}! So glad you're here. Come find me at the 5am or 6pm class and we'll get you dialed in. 💪`, seed: 'true' })]);
+      await client.query(
+        `INSERT INTO commitments (user_id, box_id, type, target, goal_count, period, status, created_by, coach_id, created_at, due_at)
+           VALUES ($1,$2,'weekly_count','Coach asked: come twice this first week',2,'week','pending','coach',$3, now() - interval '20 hours', now() + interval '6 days')`,
+        [nc.user_id, borderId, matt.userId]);
+      // Partial milestone: follow two boxmates + a fist-bump.
+      const mates = athletes.filter((a) => a.boxName === HOME_BOX && a !== matt && a !== alex).slice(0, 2);
+      for (const mate of mates) await client.query(
+        `INSERT INTO follows (follower_user_id, followee_user_id, created_at) VALUES ($1, $2, now() - interval '18 hours') ON CONFLICT DO NOTHING`,
+        [nc.user_id, mate.userId]);
+      if (mates[0]) await client.query(
+        `INSERT INTO feed_events (user_id, type, payload, created_at) VALUES ($1, 'highfive', $2, now() - interval '16 hours')`,
+        [nc.user_id, JSON.stringify({ to_name: mates[0].name.split(' ')[0], seed: 'true' })]);
+    }
+
+    // An at-risk newcomer (joined 5 days ago, isolated — no welcome/buddy/logs)
+    // so the coach's early-intervention flag has a real example to surface.
+    if (borderId) {
+      const ar = await upsertUser(client, 'atrisk.borderland@wurqdemo.io');
+      await upsertProfile(client, ar, { display_name: 'Sam Reyes', gym_name: HOME_BOX, exp: 'beginner' });
+      await client.query(
+        `INSERT INTO box_memberships (user_id, box_id, joined_at) VALUES ($1, $2, now() - interval '5 days')
+           ON CONFLICT (user_id, box_id) DO UPDATE SET joined_at = EXCLUDED.joined_at`, [ar, borderId]);
+      await client.query(`DELETE FROM box_memberships WHERE user_id = $1 AND box_id <> $2`, [ar, borderId]);
+    }
+
+    // A member approaching their 30-day mark — integrating well, check-in due.
+    if (borderId) {
+      const m30 = await upsertUser(client, 'm30.borderland@wurqdemo.io');
+      await upsertProfile(client, m30, { display_name: 'Nadia Quinn', gym_name: HOME_BOX, exp: 'intermediate' });
+      await client.query(
+        `INSERT INTO box_memberships (user_id, box_id, joined_at) VALUES ($1, $2, now() - interval '30 days')
+           ON CONFLICT (user_id, box_id) DO UPDATE SET joined_at = EXCLUDED.joined_at`, [m30, borderId]);
+      await client.query(`DELETE FROM box_memberships WHERE user_id = $1 AND box_id <> $2`, [m30, borderId]);
+      // ~6 workouts across the month so she's clearly integrating.
+      const rng30 = mulberry32(SEED + 555);
+      for (const k of [27, 22, 16, 9, 4, 1]) {
+        const r = genResult(k, 0.55, rng30);
+        await client.query(
+          `INSERT INTO results (user_id, workout_id, time_seconds, rom_pct, unbroken_sets, holistic_score, avg_hr, peak_hr, calories, power_output, work_volume, movements, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT (user_id, workout_id) DO NOTHING`,
+          [m30, workoutIds[k], r.time, r.rom, r.sets, r.holistic, r.metrics.avg_hr, r.metrics.peak_hr, r.metrics.calories, r.metrics.power_output, r.metrics.work_volume, JSON.stringify(r.metrics.movements), ts(k)]);
+      }
+      // Connected + paired so she reads as integrated; public 30-day milestone.
+      const mentor30 = (buddyPoolByBox[HOME_BOX] || [])[0];
+      if (mentor30) await client.query(
+        `INSERT INTO buddies (new_member_user_id, mentor_user_id, box_id, started_at) VALUES ($1,$2,$3, now() - interval '30 days')
+           ON CONFLICT (new_member_user_id) DO NOTHING`, [m30, mentor30.userId, borderId]);
+      for (const mate of athletes.filter((a) => a.boxName === HOME_BOX).slice(0, 3)) await client.query(
+        `INSERT INTO follows (follower_user_id, followee_user_id, created_at) VALUES ($1,$2, now() - interval '20 days') ON CONFLICT DO NOTHING`, [m30, mate.userId]);
+      await client.query(
+        `INSERT INTO feed_events (user_id, type, payload, created_at) VALUES ($1, 'milestone_30day', $2, now() - interval '2 hours')`,
+        [m30, JSON.stringify({ days: 30, seed: 'true' })]);
+    }
+
     await client.query('COMMIT');
   } catch (e) {
     await client.query('ROLLBACK');
@@ -994,13 +1096,16 @@ async function main() {
            (SELECT COUNT(*) FROM box_finances)::int AS finances,
            (SELECT COUNT(*) FROM profiles WHERE wurq_connected)::int AS wurq,
            (SELECT COUNT(*) FROM results WHERE source='wurq')::int AS synced,
+           (SELECT COUNT(*) FROM buddies)::int AS buddies,
+           (SELECT COUNT(*) FROM profiles WHERE welcome_buddy)::int AS optins,
            (SELECT COUNT(*) FROM feed_events)::int AS feed,
            (SELECT COUNT(*) FROM user_badges)::int AS badges`);
   const c = t.rows[0];
   console.log(`[seed] world rebuilt — ${c.boxes} boxes, ${c.athletes} athletes, ${c.results} results, ` +
     `${c.workouts} workouts, ${c.challenges} challenges, ${c.competitions} competitions, ` +
     `${c.partners} training partners, ${c.h2h} head-to-heads, ${c.commitments} commitments, ` +
-    `${c.finances} box finances, ${c.wurq} WurQ-connected, ${c.synced} synced results, ${c.feed} feed events, ${c.badges} badge awards.`);
+    `${c.finances} box finances, ${c.wurq} WurQ-connected, ${c.synced} synced results, ` +
+    `${c.buddies} buddy pairings, ${c.optins} buddy opt-ins, ${c.feed} feed events, ${c.badges} badge awards.`);
   console.log(`[seed] Demo box: "${HOME_BOX}". Demo logins: ${DEMO_ATHLETES.map((p) => `${p.email} (${p.name})`).join(', ')}.`);
 }
 

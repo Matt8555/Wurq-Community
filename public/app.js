@@ -562,6 +562,10 @@ async function renderRichProfile(targetId, opts) {
         ? '<div class="wurq-prof on"><span><span class="wurq-dot"></span> WurQ connected — workouts sync automatically</span><button class="link" id="wurqManage">Disconnect</button></div>'
         : '<button class="wurq-prof off" id="wurqConnectProf">⌚ Connect your WurQ app to sync workouts</button>') : ''}
 
+      ${!ro ? `<div class="buddy-optin ${u.welcome_buddy ? 'on' : ''}" id="buddyOptin">
+        <span>🤝 ${u.welcome_buddy ? "You're a welcome buddy — thank you!" : 'Become a welcome buddy for new members'}</span>
+        <span class="bo-toggle">${u.welcome_buddy ? 'On' : 'Opt in'}</span></div>` : ''}
+
       <div class="fitter">
         <div>
           <div class="fitter-lab">This week's avg score</div>
@@ -642,6 +646,13 @@ async function renderRichProfile(targetId, opts) {
   const wmg = wrap.querySelector('#wurqManage');
   if (wmg) wmg.addEventListener('click', async () => {
     try { await setWurqConnected(false); showToast('WurQ disconnected'); renderRichProfile(); } catch (e) { showToast(e.message); }
+  });
+  const bo = wrap.querySelector('#buddyOptin');
+  if (bo) bo.addEventListener('click', async () => {
+    const turningOn = !u.welcome_buddy;
+    try { await api('POST', `/api/users/${userId}/buddy-optin`, { optIn: turningOn });
+      showToast(turningOn ? "You're a welcome buddy 🤝" : 'Opted out'); renderRichProfile(); }
+    catch (e) { showToast(e.message); }
   });
   if (!ro) {
     const r2 = wrap.querySelector('#reset2');
@@ -786,7 +797,7 @@ async function renderLog() {
       const payload = buildWurqPayload(profile.email, w);
       const resp = await postWurqSync(payload);
       showToast('Synced from WurQ ⌚');
-      renderLogged(resp.result, w, resp.newBadges || [], resp.prs || [], resp.comeback, { synced: true, metrics: payload.metrics });
+      renderLogged(resp.result, w, resp.newBadges || [], resp.prs || [], resp.comeback, { synced: true, metrics: payload.metrics, firstWorkout: resp.firstWorkout });
     } catch (e) { wErr.textContent = e.message; simBtn.disabled = false; simBtn.textContent = '⌚ Simulate WurQ sync'; }
   });
 
@@ -817,7 +828,7 @@ async function renderLog() {
         userId, workoutId: w.workout_id, time_seconds, rom_pct, unbroken_sets,
       });
       showToast(resp.prs && resp.prs.length ? 'New PR! 🎉' : (resp.comeback ? 'Welcome back! 🔥' : 'Logged ✓'));
-      renderLogged(resp.result, w, resp.newBadges || [], resp.prs || [], resp.comeback);
+      renderLogged(resp.result, w, resp.newBadges || [], resp.prs || [], resp.comeback, { firstWorkout: resp.firstWorkout });
     } catch (e) {
       err.textContent = e.message;
       btn.disabled = false; btn.textContent = 'Log result';
@@ -852,11 +863,13 @@ function renderLogged(saved, w, newBadges, prs, comeback, opts) {
       <div class="sensor"><div class="sv">${m.calories_kcal ?? '—'}</div><div class="sl">Calories</div></div>
       <div class="sensor"><div class="sv">${m.work_volume_kg != null ? Math.round(m.work_volume_kg) : '—'}</div><div class="sl">Volume kg</div></div>
     </div>` : '';
+  const firstName = (profile && profile.display_name || '').split(' ')[0] || 'athlete';
   content.innerHTML = '';
   content.appendChild(el(`
     <div>
-      <h1 class="title">${prs.length ? 'New PR! 🎉' : (comeback ? 'You\'re back! 🔥' : (opts.synced ? 'Workout synced ⌚' : 'Nice work!'))}</h1>
+      <h1 class="title">${opts.firstWorkout ? `Welcome to the board, ${escapeHtml(firstName)}! 🎉` : (prs.length ? 'New PR! 🎉' : (comeback ? 'You\'re back! 🔥' : (opts.synced ? 'Workout synced ⌚' : 'Nice work!')))}</h1>
       <p class="subtitle">${escapeHtml(w.name)} · ${fmtTime(saved.time_seconds)} · ${Math.round(saved.rom_pct)}% ROM</p>
+      ${opts.firstWorkout ? '<div class="firstwo-banner">🏋️ Your very first logged workout — you\'re on the board now. This is day one!</div>' : ''}
       ${sensorGrid}
       ${comeback ? `<div class="pr-celebrate"><div class="pc-burst">🔥</div><div class="pc-title">Comeback</div><div class="pc-msg">${escapeHtml(comeback.message || 'Welcome back!')}</div></div>` : ''}
       ${prs.map((pr) => `
@@ -1037,6 +1050,24 @@ function feedText(ev) {
   if (ev.type === 'commit_kept') {
     return `${name} kept ${p.by_coach ? "their coach's" : 'a'} commitment 🎯 <span class="accent">followed through!</span><div class="feed-post">${escapeHtml(p.target || '')}</div>`;
   }
+  if (ev.type === 'member_welcome') {
+    return `👋 <span class="accent">Welcome ${escapeHtml(p.new_member || ev.display_name)}</span> to ${escapeHtml(p.box_name || 'the box')}!${ev.kudos ? `<div class="feed-sub-line">${ev.kudos} ${ev.kudos === 1 ? 'person has' : 'people have'} welcomed them</div>` : ''}`;
+  }
+  if (ev.type === 'coach_welcome') {
+    return `${name} <span class="role-tag">Coach</span> welcomed <span class="accent">${escapeHtml(p.to_name || 'a new member')}</span> 👋<div class="feed-post">${escapeHtml(p.text || '')}</div>`;
+  }
+  if (ev.type === 'first_workout') {
+    return `🎉 Welcome to the board, <b>${escapeHtml(ev.display_name)}</b>! First workout logged — <b>${escapeHtml(p.workout_name || 'a WOD')}</b> <span class="accent">${num(p.holistic_score)}</span>`;
+  }
+  if (ev.type === 'welcome_complete') {
+    return `${name} completed their first-week welcome path 🌟 <span class="accent">First Week badge!</span>`;
+  }
+  if (ev.type === 'milestone_30day') {
+    return `${name} hit <span class="accent">30 days</span> at ${escapeHtml(p.box_name || 'the box')} 🎉 one month strong!`;
+  }
+  if (ev.type === 'buddy_paired') {
+    return `${name} became a <span class="accent">welcome buddy</span> for a new member 🤝`;
+  }
   return `${name} did something`;
 }
 
@@ -1211,22 +1242,28 @@ function affiliateCardHtml(a) {
 }
 
 function feedItemEl(ev) {
-  const elevated = ev.is_coach || ev.type === 'announcement';
+  const isWelcome = ev.type === 'member_welcome';
+  const celebrate = ['first_workout', 'welcome_complete', 'milestone_30day'].includes(ev.type);
+  const elevated = ev.is_coach || ev.type === 'announcement' || ev.type === 'coach_welcome';
   const item = el(`
-    <div class="feed-item ${elevated ? 'feed-elevated' : ''}">
+    <div class="feed-item ${elevated ? 'feed-elevated' : ''} ${isWelcome ? 'feed-welcome' : ''} ${celebrate ? 'feed-celebrate' : ''}">
       ${avatarHtml(ev.avatar_url, ev.display_name, 'feed-av')}
       <div class="feed-body">
         <div class="feed-text">${feedText(ev)}</div>
         <div class="feed-meta">
           <span class="feed-time">${timeAgo(ev.created_at)}</span>
-          <button class="kudos" data-id="${escapeAttr(ev.event_id)}">👏 <span class="kudos-n">${ev.kudos}</span></button>
+          <button class="kudos ${isWelcome ? 'welcome-btn-feed' : ''}" data-id="${escapeAttr(ev.event_id)}">${isWelcome ? '👋 Welcome' : '👏'} <span class="kudos-n">${ev.kudos}</span></button>
         </div>
       </div>
     </div>`);
   const btn = item.querySelector('.kudos');
   btn.addEventListener('click', async () => {
-    try { const r = await api('POST', `/api/feed/${ev.event_id}/kudos`); item.querySelector('.kudos-n').textContent = r.kudos; btn.classList.add('kudosed'); }
-    catch (e) { showToast(e.message); }
+    try {
+      const r = await api('POST', `/api/feed/${ev.event_id}/${isWelcome ? 'welcome' : 'kudos'}`);
+      item.querySelector('.kudos-n').textContent = (isWelcome ? r.count : r.kudos);
+      btn.classList.add('kudosed');
+      if (isWelcome) showToast('Welcome sent 👋');
+    } catch (e) { showToast(e.message); }
   });
   return item;
 }
@@ -1254,6 +1291,7 @@ async function renderCommunityHub(container) {
   container.innerHTML = '';
   const wrap = el(`
     <div>
+      ${newcomers.some((n) => n.user_id === userId) ? '<div class="welcome-return" id="welcomeReturn">🎉 You\'re new here — see your welcome &amp; first-week path →</div>' : ''}
       ${goal ? teamGoalCardHtml(goal) : ''}
       <div class="commit-cta" id="commitCta">
         <div class="cc-l"><div class="cc-t">🎯 Commitments</div><div class="cc-s" id="commitRally">Loading…</div></div>
@@ -1300,9 +1338,14 @@ async function renderCommunityHub(container) {
   if (!newcomers.length) ncEl.appendChild(el('<div class="muted-note">No new members this week.</div>'));
   newcomers.forEach((n) => {
     const row = el(`<div class="list-row"><div class="lr-main"><div class="nm">${escapeHtml(n.display_name)}</div>
-      <div class="meta">joined ${timeAgo(n.joined_at)}</div></div><button class="pill-btn welcome-btn">👋 Welcome</button></div>`);
-    row.querySelector('.welcome-btn').addEventListener('click', (e) => {
-      showToast(`Welcome sent to ${n.display_name} 👋`); e.currentTarget.textContent = 'Welcomed ✓'; e.currentTarget.disabled = true;
+      <div class="meta">joined ${timeAgo(n.joined_at)}${n.welcomed ? ' · ' + n.welcomed + ' welcomed' : ''}</div></div><button class="pill-btn welcome-btn">👋 Welcome</button></div>`);
+    row.querySelector('.welcome-btn').addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      try {
+        if (n.welcome_event_id) await api('POST', `/api/feed/${n.welcome_event_id}/welcome`);
+        showToast(`Welcome sent to ${n.display_name.split(' ')[0]} 👋`);
+        btn.textContent = 'Welcomed ✓'; btn.disabled = true;
+      } catch (err) { showToast(err.message); }
     });
     ncEl.appendChild(row);
   });
@@ -1310,6 +1353,8 @@ async function renderCommunityHub(container) {
   wrap.querySelector('#giveShout').addEventListener('click', () =>
     openShoutComposer(wrap.querySelector('#shoutComposer'), members));
   wrap.querySelector('#bringFriend').addEventListener('click', () => renderReferral());
+  const wr = wrap.querySelector('#welcomeReturn');
+  if (wr) wr.addEventListener('click', () => renderWelcome());
   wrap.querySelector('#commitCta').addEventListener('click', () => renderCommitments());
   (async () => {
     try {
@@ -2181,11 +2226,12 @@ async function renderCoach() {
   if (!profile || !profile.box_id) { needBoxPrompt('Set your gym / box to use coach tools.'); return; }
   const boxId = profile.box_id;
   content.innerHTML = '<p class="subtitle">Loading roster…</p>';
-  let roster, commits;
+  let roster, commits, welcomeQ;
   try {
-    [roster, commits] = await Promise.all([
+    [roster, commits, welcomeQ] = await Promise.all([
       api('GET', `/api/box/${boxId}/roster?userId=${userId}`),
       api('GET', `/api/box/${boxId}/commitments?userId=${userId}`).catch(() => null),
+      api('GET', `/api/box/${boxId}/welcome-queue?userId=${userId}`).catch(() => null),
     ]);
   } catch (e) { content.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
 
@@ -2223,6 +2269,15 @@ async function renderCoach() {
         <div class="error" id="annErr"></div>
       </div>
 
+      ${welcomeQ ? `<div class="sec-title">🌱 New members <span class="muted-note" style="font-weight:400">${welcomeQ.summary.new_count} this fortnight</span></div>
+      <div class="coach-stats">
+        <div class="cstat"><div class="n">${welcomeQ.summary.new_count}</div><div class="l">new members</div></div>
+        <div class="cstat warn"><div class="n">${welcomeQ.summary.at_risk}</div><div class="l">at-risk</div></div>
+        <div class="cstat"><div class="n">${welcomeQ.summary.checkins_due}</div><div class="l">30-day check-ins</div></div>
+      </div>
+      ${welcomeQ.checkins.length ? '<div class="sub-lab">📆 30-day check-ins due</div><div id="checkins"></div>' : ''}
+      <div id="welcomeNew"></div>` : ''}
+
       ${commits ? `<div class="sec-title">🎯 Accountability</div>
       <div class="coach-stats">
         <div class="cstat"><div class="n">${commits.summary.active}</div><div class="l">committed</div></div>
@@ -2250,6 +2305,57 @@ async function renderCoach() {
   content.appendChild(wrap);
 
   wrap.querySelector('#cBack').addEventListener('click', () => renderRichProfile());
+
+  // ---- New-member welcome queue
+  if (welcomeQ) {
+    const ckEl = wrap.querySelector('#checkins');
+    if (ckEl) welcomeQ.checkins.forEach((c) => {
+      const row = el(`<div class="list-row"><div class="lr-main"><div class="nm">${escapeHtml(c.display_name)}</div>
+        <div class="meta">day ${c.days_since} — how's their first month?</div></div><button class="pill-btn" data-id="${c.user_id}">✓ Checked in</button></div>`);
+      row.querySelector('button').addEventListener('click', async (e) => {
+        const btn = e.currentTarget;
+        try { await api('POST', '/api/coach/checkin', { coachId: userId, userId: c.user_id }); showToast(`Checked in with ${c.display_name.split(' ')[0]} ✓`); btn.textContent = 'Done ✓'; btn.disabled = true; }
+        catch (err) { showToast(err.message); }
+      });
+      ckEl.appendChild(row);
+    });
+
+    const nwEl = wrap.querySelector('#welcomeNew');
+    if (nwEl && !welcomeQ.new_members.length) nwEl.appendChild(el('<div class="muted-note">No new members right now.</div>'));
+    if (nwEl) welcomeQ.new_members.forEach((n) => {
+      const chips = [];
+      chips.push(`<span class="wq-chip ${n.welcomed ? 'on' : ''}">👋 ${n.welcomed}</span>`);
+      chips.push(`<span class="wq-chip ${n.buddy_paired ? 'on' : ''}">🤝 buddy</span>`);
+      chips.push(`<span class="wq-chip ${n.greeted ? 'on' : ''}">🧢 greeted</span>`);
+      chips.push(`<span class="wq-chip">✅ ${n.milestone_done}/${n.milestone_total}</span>`);
+      const card = el(`
+        <div class="wq-card ${n.at_risk ? 'at-risk' : ''}">
+          <div class="wq-head">
+            <div class="wq-id"><div class="nm">${escapeHtml(n.display_name)}${n.at_risk ? ' <span class="conn-warn">⚠ at-risk</span>' : ''}</div>
+              <div class="meta">day ${n.days_since} · ${n.connections} connections · ${n.workouts} workouts</div></div>
+          </div>
+          <div class="wq-chips">${chips.join('')}</div>
+          <div class="wq-actions">
+            ${n.greeted ? '' : '<button class="m-act" data-act="greet">🧢 Send welcome</button>'}
+            ${n.commitment_asked ? '' : '<button class="m-act" data-act="ask">✊ Ask 2x/week</button>'}
+          </div>
+        </div>`);
+      const greetBtn = card.querySelector('[data-act="greet"]');
+      if (greetBtn) greetBtn.addEventListener('click', async (e) => {
+        const btn = e.currentTarget;
+        const text = `Welcome to the box, ${n.display_name.split(' ')[0]}! Stoked to have you — come say hi at class. 💪`;
+        try { await api('POST', '/api/coach/welcome', { coachId: userId, userId: n.user_id, text }); showToast('Welcome note sent 🧢'); btn.textContent = 'Sent ✓'; btn.disabled = true; }
+        catch (err) { showToast(err.message); }
+      });
+      const askBtn = card.querySelector('[data-act="ask"]');
+      if (askBtn) askBtn.addEventListener('click', async (e) => {
+        const btn = e.currentTarget;
+        try { await api('POST', '/api/commitments/coach-request', { coachId: userId, userId: n.user_id, type: 'weekly_count', target: 'Coach asked: come twice this week', goalCount: 2 }); showToast('First-week commitment asked ✊'); btn.textContent = 'Asked ✓'; btn.disabled = true; }
+        catch (err) { showToast(err.message); }
+      });
+      nwEl.appendChild(card);
+    });
+  }
 
   if (commits) {
     const sel = wrap.querySelector('#askWho');
@@ -2359,7 +2465,7 @@ async function renderOnboarding() {
   if (!d.box) { renderRichProfile(); return; }
   await ensureFollowing();
 
-  const finish = () => { showToast('You\'re all set — welcome to the crew! 🎉'); renderRichProfile(); };
+  const finish = () => { showToast('You\'re all set — welcome to the crew! 🎉'); renderWelcome(); };
 
   content.innerHTML = '';
   const wrap = el(`
@@ -2445,6 +2551,108 @@ async function renderOnboarding() {
 
   wrap.querySelector('#obDone').addEventListener('click', finish);
   wrap.querySelector('#obSkip').addEventListener('click', () => renderRichProfile());
+}
+
+// ============================================================================
+// New-member welcome ritual — the warm "first experience"
+// ============================================================================
+async function renderWelcome() {
+  setScreenName('Welcome');
+  if (!userId) return setView('profile');
+  content.innerHTML = '<p class="subtitle">Loading your welcome…</p>';
+  await ensureFollowing(); // buddy card uses makeFollowButton
+  let d;
+  try { d = await api('GET', `/api/users/${userId}/welcome`); }
+  catch (e) { content.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+  if (!d.box) { renderRichProfile(); return; }
+
+  const m = d.milestones;
+  const co = d.coach || {};
+  const greeting = co.greeting;
+  const pending = co.pending_commitment;
+  const buddy = d.buddy;
+
+  content.innerHTML = '';
+  const wrap = el(`
+    <div>
+      <div class="welcome-hero ${m.complete ? 'done' : ''}">
+        <div class="wh-burst">${m.complete ? '🌟' : '👋'}</div>
+        <div class="wh-title">${m.complete ? 'Welcome complete!' : `Welcome, ${escapeHtml((d.member.display_name || '').split(' ')[0] || 'athlete')}!`}</div>
+        <div class="wh-sub">${m.complete
+          ? `You've found your people at ${escapeHtml(d.box.short)} — that's what makes it stick.`
+          : `<b>${d.welcome.count}</b> ${d.welcome.count === 1 ? 'person has' : 'people have'} welcomed you to ${escapeHtml(d.box.short)} 🎉`}</div>
+      </div>
+
+      ${d.first_week_badge ? '<div class="starter-badge">🏅 First Week badge earned</div>' : ''}
+      ${d.thirty_day ? '<div class="starter-badge">🎉 30 days strong — one month at the box!</div>' : ''}
+
+      ${greeting ? `<div class="sec-title">A note from your coach</div>
+        <div class="card coach-note">
+          <div class="cn-head">🧢 ${escapeHtml(greeting.coach_name)}</div>
+          <div class="cn-text">${escapeHtml(greeting.text)}</div>
+        </div>` : ''}
+
+      ${pending ? `<div class="card coach-ask">
+          <div class="ca-text">Your coach asks: <b>${escapeHtml(pending.target)}</b></div>
+          <div class="ca-actions"><button class="btn-primary" id="caAccept">Accept</button><button class="btn-outline" id="caDecline">Maybe later</button></div>
+        </div>` : ''}
+
+      ${buddy ? `<div class="sec-title">Your welcome buddy</div>
+        <div class="card buddy-card">
+          ${avatarHtml(buddy.avatar_url, buddy.display_name, 'feed-av')}
+          <div class="bc-main"><div class="nm">${escapeHtml(buddy.display_name)}</div>
+            <div class="meta">is your welcome buddy — say hi! They'll show you the ropes this month.</div></div>
+          <span class="bc-follow"></span>
+        </div>` : ''}
+
+      <div class="sec-title">Your first week <span class="muted-note" style="font-weight:400">${m.done}/${m.total}</span></div>
+      <div class="ms-bar"><span style="width:${Math.round(100 * m.done / m.total)}%"></span></div>
+      <div id="msList"></div>
+
+      <button class="btn-primary" id="wToFeed" style="margin-top:16px">See the box feed</button>
+      <div class="center" style="margin-top:10px"><button class="link" id="wToProfile">Go to my profile</button></div>
+    </div>`);
+  content.appendChild(wrap);
+
+  if (buddy) {
+    const fb = makeFollowButton(buddy.user_id);
+    if (fb) { if (buddy.following) { fb.classList.add('following'); fb.textContent = 'Following'; } wrap.querySelector('.bc-follow').appendChild(fb); }
+  }
+
+  if (pending) {
+    const respond = async (action) => {
+      try { await api('POST', `/api/commitments/${pending.id}/respond`, { userId, action });
+        showToast(action === 'accept' ? 'Committed ✊' : 'No worries — maybe later'); renderWelcome(); }
+      catch (e) { showToast(e.message); }
+    };
+    wrap.querySelector('#caAccept').addEventListener('click', () => respond('accept'));
+    wrap.querySelector('#caDecline').addEventListener('click', () => respond('decline'));
+  }
+
+  const STEP_ICON = { first_workout: '🏋️', fist_bump: '✊', cohort: '👥', follow3: '➕', meet_coach: '🧢', buddy: '🤝' };
+  const STEP_GO = {
+    first_workout: () => setView('log'),
+    fist_bump: () => { competeTab = 'people'; setView('compete'); },
+    cohort: () => setView('community'),
+    follow3: () => { competeTab = 'people'; setView('compete'); },
+    meet_coach: () => { competeTab = 'people'; setView('compete'); },
+    buddy: () => { if (buddy) { const fb = wrap.querySelector('.bc-follow .follow-btn'); if (fb) fb.click(); } },
+  };
+  const msList = wrap.querySelector('#msList');
+  m.steps.forEach((s) => {
+    const row = el(`
+      <div class="ms-row ${s.done ? 'done' : ''}">
+        <div class="ms-check">${s.done ? '✓' : (STEP_ICON[s.key] || '○')}</div>
+        <div class="ms-label">${escapeHtml(s.label)}</div>
+        ${s.done ? '<span class="ms-tag">done</span>' : '<button class="ms-go" data-k="' + s.key + '">Go</button>'}
+      </div>`);
+    const go = row.querySelector('.ms-go');
+    if (go) go.addEventListener('click', () => { const fn = STEP_GO[go.dataset.k]; if (fn) fn(); });
+    msList.appendChild(row);
+  });
+
+  wrap.querySelector('#wToFeed').addEventListener('click', () => setView('feed'));
+  wrap.querySelector('#wToProfile').addEventListener('click', () => renderRichProfile());
 }
 
 // ============================================================================

@@ -15,8 +15,8 @@ Tables: `users`, `profiles`, `identities`, `boxes`, `box_memberships`,
 `box_roles`, `workouts`, `results`, `badges`, `user_badges`, `feed_events`,
 `squads`, `squad_members`, `follows`, `referrals`, `challenges`, `competitions`,
 `training_partners`, `head_to_heads`, `box_finances`, `commitments`
-(plus `profiles.wurq_connected` and `results.source` for the WurQ integration).
-The `identities`
+(plus `profiles.wurq_connected` / `results.source` for the WurQ integration, and
+`buddies` + `profiles.welcome_buddy` for the welcome ritual). The `identities`
 table lets you link other identity sources later (Shopify, Circle, watch, …)
 **without restructuring** — each source just adds a row keyed by `user_id`.
 
@@ -116,7 +116,13 @@ one file so they are easy to tune.
 | POST | `/api/box/:boxId/wod` | Coach-gated: program today's WOD (`name`, `type`, `description`, `scaling`); tags `programmed_by`. |
 | GET | `/api/box/:boxId/roster?userId=` | Coach-gated roster: sessions, last logged, week-vs-prev score trend, connection count, quiet & under-connected flags, plus today/total/quiet summary. |
 | POST | `/api/box/:boxId/announce` | Coach-gated: post a box announcement (`announcement` feed event everyone sees). |
-| GET | `/api/users/:userId/onboarding` | Ensures the user's "[Box] — New Crew" cohort squad, returns box, cohort, coaches to meet, and 5 suggested boxmates to follow + current connection count. |
+| GET | `/api/users/:userId/onboarding` | Ensures the user's "[Box] — New Crew" cohort squad, returns box, cohort, coaches to meet, 5 suggested boxmates, and kicks off the welcome ritual (public welcome event + buddy pairing). |
+| GET | `/api/users/:userId/welcome` | The new member's welcome experience: welcomes received, coach greeting + pending first-week commitment, buddy pairing, first-week milestone path (live), 30-day milestone, starter-badge state. |
+| POST | `/api/feed/:eventId/welcome` | One-tap public welcome (a greeting) on a `member_welcome` event — welcomes pile up. |
+| POST | `/api/users/:userId/buddy-optin` | Veteran opts in/out as a welcome buddy (`optIn`). |
+| POST | `/api/coach/welcome` | Coach-gated: send a new member a personal welcome note (`coach_welcome` feed event). |
+| POST | `/api/coach/checkin` | Coach-gated: record a 30-day check-in (clears the nudge). |
+| GET | `/api/box/:boxId/welcome-queue?userId=` | Coach-gated: new members + their integration status (welcomes, buddy, greeting, milestones, connections), early at-risk flags, and 30-day check-ins due. |
 | GET | `/api/competitions?userId=&scope=&cadence=` | Active competitions visible to a user (community + their box), each with the user's rank/value, the leader, and time remaining; plus recently completed comps with winners. |
 | GET | `/api/competitions/:id/leaderboard?userId=` | A competition's live leaderboard (top 25 + the user's own row), computed from results in the window by the comp's metric. |
 | GET | `/api/users/:userId/competitions` | The user's standing in every active comp they're placing in, best rank first (powers "you're #2 in Most Improved this week"). |
@@ -264,6 +270,41 @@ Coaches are a real, per-box role (`box_roles` table — a user can be both
   connections. Connection count (`squad_members` + `follows`) is queryable as a
   churn-risk signal and shown on the coach roster.
 
+## New-member welcome ritual
+
+A deep first-week welcome that builds ON the cohort/onboarding/coach systems —
+the anti-single-connection-fragility mechanic, so every new member forms multiple
+ties in week one.
+
+- **Public welcome** — joining fires a `member_welcome` feed event ("Welcome
+  [name] to [box]!"); existing members give a one-tap **👋 Welcome** (welcomes
+  pile up). The new member's welcome screen leads with *"12 people welcomed you"*
+  — a warm first experience.
+- **Coach personal greeting** — the coach sends a personal welcome note
+  (`coach_welcome`) and asks a first-week commitment ("come twice this week",
+  via the existing commitment system); both surface to the member as a note from
+  their coach they can accept/decline.
+- **Buddy / mentor pairing** (`buddies` table; veterans opt in via
+  `profiles.welcome_buddy`) — a new member is paired with an opted-in veteran at
+  their box (similar level if possible) for their first month; shown prominently
+  with one-tap follow. Both are notified.
+- **First-week milestone path** — a live checklist (log first workout, give a
+  fist-bump, join your New Crew squad, follow 3, meet your coach, say hi to your
+  buddy), computed honestly from existing data. Completing it fires a
+  *"Welcome complete!"* moment + a **First Week** starter badge.
+- **First-workout celebration** — a new member's first logged workout (via manual
+  log OR WurQ sync — both run `recordResult`) gets extra fanfare
+  ("Welcome to the board, [name]!") + a **Day One** starter badge.
+- **30-day check-in** — at ~30 days the coach is nudged to check in, the member's
+  milestone is celebrated publicly (`milestone_30day`), and new members who
+  aren't integrating (low connections/activity) are flagged **early at-risk** in
+  the coach's welcome queue so they can intervene.
+
+The seed shows it alive: opted-in buddies, recent new members mid-ritual (some
+welcomes in, a buddy paired, milestone path partway, a coach greeting + pending
+first-week commitment), an isolated **at-risk** newcomer, and a member at their
+**30-day** mark with a check-in due.
+
 ## Referrals, global community & affiliate status
 
 The platform tells the full story — individual → squad → box → box-vs-box →
@@ -394,6 +435,11 @@ What it generates (a 4-week window ending today, framed as June 2026):
   accept), with `commit_made` / `commit_kept` feed celebrations.
 - **~8 WurQ-connected athletes** (incl. the demo logins) with recent results
   flagged as **synced from WurQ** (`source='wurq'`) and ⌚-tagged in the feed.
+- **Welcome ritual alive**: ~120 opted-in welcome buddies and ~20 buddy
+  pairings; recent new members mid-ritual (welcomes piling up, buddy paired,
+  partial milestone path, a coach greeting + pending first-week commitment); an
+  isolated **at-risk** newcomer; and a member at their **30-day** mark with a
+  coach check-in due.
 
 **Performance & idempotency:** results load via batched multi-row INSERTs (not
 one at a time); the whole run takes ~1–2s. The script **rebuilds the world

@@ -830,6 +830,70 @@
       margin-bottom: 16px; display: flex; flex-direction: column; gap: 6px; font-size: 0.82rem; color: var(--chalk); }
     .wurq-modal .btn-primary { width: 100%; margin-bottom: 8px; }
 
+    /* ---- New-member welcome ritual ---- */
+    .welcome-hero { text-align: center; border-radius: 18px; padding: 22px 16px; margin-bottom: 14px;
+      border: 1px solid var(--acid); background: linear-gradient(160deg, var(--acid-dim), var(--surface)); }
+    .welcome-hero.done { background: linear-gradient(160deg, rgba(255,210,74,0.16), var(--surface)); border-color: #ffd24a; }
+    .welcome-hero .wh-burst { font-size: 2.6rem; line-height: 1; }
+    .welcome-hero .wh-title { font-size: 1.5rem; font-weight: 900; margin: 8px 0 4px; }
+    .welcome-hero .wh-sub { color: var(--chalk); font-size: 0.9rem; line-height: 1.5; }
+    .welcome-hero .wh-sub b { color: var(--acid); }
+    .starter-badge { background: var(--surface); border: 1px solid #ffd24a; color: #ffd24a; border-radius: 12px;
+      padding: 11px 13px; font-size: 0.86rem; font-weight: 800; margin-bottom: 12px; text-align: center; }
+
+    .coach-note { border-color: var(--acid); }
+    .coach-note .cn-head { font-weight: 800; font-size: 0.86rem; color: var(--acid); margin-bottom: 6px; }
+    .coach-note .cn-text { font-size: 0.9rem; line-height: 1.5; color: var(--chalk); }
+    .coach-ask { border-color: #7cd4ff; }
+    .coach-ask .ca-text { font-size: 0.88rem; margin-bottom: 10px; }
+    .coach-ask .ca-actions { display: flex; gap: 8px; } .coach-ask .ca-actions button { flex: 1; }
+
+    .buddy-card { display: flex; align-items: center; gap: 11px; border-color: var(--acid); }
+    .buddy-card .bc-main { flex: 1; min-width: 0; }
+    .buddy-card .nm { font-weight: 800; font-size: 0.95rem; }
+    .buddy-card .meta { color: var(--muted); font-size: 0.78rem; margin-top: 2px; line-height: 1.45; }
+    .buddy-card .bc-follow { flex: none; }
+
+    .ms-bar { height: 9px; background: var(--surface-2); border-radius: 999px; overflow: hidden; margin: 4px 0 12px; }
+    .ms-bar span { display: block; height: 100%; background: var(--acid); border-radius: 999px; transition: width 0.4s; }
+    .ms-row { display: flex; align-items: center; gap: 11px; background: var(--surface); border: 1px solid var(--border);
+      border-radius: 12px; padding: 11px 13px; margin-bottom: 8px; }
+    .ms-row.done { border-color: var(--acid); background: var(--acid-dim); }
+    .ms-check { width: 26px; height: 26px; flex: none; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+      background: var(--surface-2); font-size: 0.9rem; }
+    .ms-row.done .ms-check { background: var(--acid); color: #10130a; font-weight: 900; }
+    .ms-label { flex: 1; font-size: 0.88rem; font-weight: 600; }
+    .ms-tag { flex: none; color: var(--acid); font-size: 0.72rem; font-weight: 800; }
+    .ms-go { flex: none; background: var(--acid); color: #10130a; border: none; border-radius: 999px;
+      padding: 6px 14px; font-size: 0.76rem; font-weight: 800; cursor: pointer; }
+
+    .welcome-return { background: linear-gradient(135deg, var(--acid-dim), var(--surface)); border: 1px solid var(--acid);
+      color: var(--acid); border-radius: 12px; padding: 11px 13px; font-size: 0.84rem; font-weight: 700; margin-bottom: 12px; cursor: pointer; }
+    .firstwo-banner { background: var(--acid-dim); border: 1px solid var(--acid); border-radius: 12px; padding: 11px 13px;
+      font-size: 0.86rem; color: var(--chalk); margin-bottom: 14px; text-align: center; }
+
+    .buddy-optin { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%;
+      border-radius: 12px; padding: 11px 13px; margin-bottom: 14px; font-size: 0.82rem; font-weight: 700; cursor: pointer;
+      background: var(--surface); border: 1px dashed var(--acid); color: var(--chalk); }
+    .buddy-optin.on { background: var(--acid-dim); border-style: solid; border-color: var(--acid); }
+    .buddy-optin .bo-toggle { flex: none; color: var(--acid); font-weight: 800; font-size: 0.78rem; }
+
+    /* feed welcome/celebrate variants */
+    .feed-item.feed-welcome { border-color: var(--acid); background: linear-gradient(135deg, var(--acid-dim), var(--surface)); }
+    .feed-item.feed-celebrate { border-color: #ffd24a55; }
+    .kudos.welcome-btn-feed { color: var(--acid); border: 1px solid var(--acid); border-radius: 999px; padding: 3px 9px; }
+
+    /* coach welcome queue */
+    .wq-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px; margin-bottom: 9px; }
+    .wq-card.at-risk { border-color: var(--danger); }
+    .wq-head .wq-id .nm { font-weight: 700; font-size: 0.9rem; }
+    .wq-head .wq-id .meta { color: var(--muted); font-size: 0.74rem; margin-top: 2px; }
+    .wq-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 9px 0; }
+    .wq-chip { font-size: 0.68rem; font-weight: 700; padding: 3px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
+    .wq-chip.on { color: var(--acid); border-color: var(--acid); background: var(--acid-dim); }
+    .wq-actions { display: flex; gap: 7px; }
+    .wq-actions .m-act { flex: 1; }
+
     .hidden { display: none !important; }
   </style>
 </head>
