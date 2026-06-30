@@ -34,7 +34,7 @@
     /* Phone-sized frame */
     .phone {
       width: 100%;
-      max-width: 480px;
+      max-width: 640px;
       margin: 0 auto;
       min-height: 100vh;
       display: flex;
@@ -182,7 +182,7 @@
     /* Bottom nav (phone) */
     .nav {
       position: fixed; bottom: 0; left: 50%; transform: translateX(-50%);
-      width: 100%; max-width: 480px;
+      width: 100%; max-width: 640px;
       display: flex; justify-content: space-around;
       background: rgba(10, 12, 8, 0.92);
       border-top: 1px solid var(--border);
@@ -200,8 +200,8 @@
     /* Desktop framing only — above 480px, present the centered column as a
        deliberate mobile-app view: faint lighter shade + thin side edges + soft
        shadow, with the fixed bottom nav aligned to the same column. Phones
-       (<=480px) are untouched and render full-width exactly as before. */
-    @media (min-width: 481px) {
+       are untouched and render full-width exactly as before. */
+    @media (min-width: 641px) {
       .phone {
         background: rgba(255, 255, 255, 0.02);
         border-left: 1px solid var(--border);
